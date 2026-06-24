@@ -1,0 +1,33 @@
+name: PlatformIO
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Build and package firmware
+        shell: pwsh
+        run: ./tools/package_firmware.ps1
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: r48display-firmware
+          path: |
+            firmware/R48Display-v*.bin
+            firmware/R48Display-v*.sha256
