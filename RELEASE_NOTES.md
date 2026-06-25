@@ -1,3 +1,29 @@
+# R48Display v0.2.2 — Release Notes
+
+## What's New in 0.2.2
+
+### LVGL Dashboard
+- Drain and charge watts combined into a single centered **WATTS** metric — they are mutually exclusive so one indicator is cleaner
+
+### LVGL Battery Page
+- **CAPACITY** metric removed from the battery page
+- **CELLS** and **TEMP** moved to a lower inward row, mirroring the dashboard HOURS/LOAD layout and clearing the health arc
+- **SPREAD** widened to a full center row above CELLS/TEMP
+
+### LVGL Status Page
+- **PWR** metric replaced with **SAVE** — shows power-save mode on/off instead of power source name
+- When the device has no STA configured (AP-only mode), the bottom yellow status line cycles every 4 seconds through: Wi-Fi SSID, AP password, and login URL (`192.168.4.1`)
+
+### Web — Temperature Fixes
+- Temperature unit (°F/°C) now applied consistently across all web values: `bh-temp` (Battery Health max temp) was always showing °C regardless of the user's setting — now converts correctly
+- Unpopulated temperature probe slots (T5/T6) previously showed `-- °F`; now show just `--`
+
+### Web — Battery Page Gauge
+- SOC gauge on the battery page now matches the dashboard gauge: same column proportions and ring size
+- "SOC" label removed from both gauges — the percentage value already fills that space
+
+---
+
 # R48Display v0.2.1 — Release Notes
 
 ## What's New in 0.2.1
