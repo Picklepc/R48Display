@@ -295,9 +295,8 @@ void buildDashboard() {
   // Row 2: HOURS left, LOAD right
   metric(5, "HOURS", 58, 287, 88, &lv_font_montserrat_18);
   metric(3, "LOAD", 214, 287, 88, &lv_font_montserrat_18);
-  // Row 3: drain and charge watts at bottom
-  metric(6, "DRAIN", 102, 323, 72, &lv_font_montserrat_16);
-  metric(7, "CHARGE", 186, 323, 72, &lv_font_montserrat_16);
+  // Row 3: combined power watts, centered
+  metric(6, "WATTS", 104, 323, 152, &lv_font_montserrat_16);
 }
 
 void buildPower() {
@@ -442,10 +441,9 @@ void updateDashboard(const Snapshot &s) {
   setText(w.metric[3], charging ? ampsText(s.chargeAmps) + " in" : String(s.loadPercent, 0) + "%");
   setText(w.metric[4], charging ? s.chargeEta : s.runEta);
   setText(w.metric[5], s.runtimeHours);
-  setText(w.metric[6], s.dischargeWatts > 1.0f ? wattsText(s.dischargeWatts) : "--");
-  setText(w.metric[7], s.chargeWatts > 1.0f ? wattsText(s.chargeWatts) : "--");
-  setTextColor(w.metric[6], charging ? COL_MUTED : COL_TEXT);
-  setTextColor(w.metric[7], charging ? COL_ACCENT : COL_MUTED);
+  const float activeWatts = charging ? s.chargeWatts : s.dischargeWatts;
+  setText(w.metric[6], activeWatts > 1.0f ? wattsText(activeWatts) : "--");
+  setTextColor(w.metric[6], charging ? COL_ACCENT : COL_TEXT);
 }
 
 void updatePower(const Snapshot &s) {
