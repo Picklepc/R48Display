@@ -290,18 +290,23 @@ void buildDashboard() {
   lv_obj_set_style_border_width(w.statusDot, 0, 0);
   w.metric[2] = label(w.status, "--", 30, 8, 112, &lv_font_montserrat_16, COL_PRIMARY, LV_TEXT_ALIGN_CENTER);
 
-  metric(3, "LOAD", 32, 242, 88, &lv_font_montserrat_18);
-  metric(4, "ETA", 136, 242, 88, &lv_font_montserrat_18);
-  metric(5, "HOURS", 240, 242, 88, &lv_font_montserrat_18);
+  // Row 1: ETA centered and wider
+  metric(4, "ETA", 96, 242, 168, &lv_font_montserrat_18);
+  // Row 2: HOURS left, LOAD right
+  metric(5, "HOURS", 58, 287, 88, &lv_font_montserrat_18);
+  metric(3, "LOAD", 214, 287, 88, &lv_font_montserrat_18);
+  // Row 3: drain and charge watts at bottom
+  metric(6, "DRAIN", 102, 323, 72, &lv_font_montserrat_16);
+  metric(7, "CHARGE", 186, 323, 72, &lv_font_montserrat_16);
 }
 
 void buildPower() {
   w.arcA = ring(w.root, 38, 28, 284, 16, COL_ACCENT);
   w.metric[0] = label(w.root, "--", 75, 114, 210, &lv_font_montserrat_40, COL_TEXT, LV_TEXT_ALIGN_CENTER);
   w.metric[1] = label(w.root, "--", 84, 157, 192, &lv_font_montserrat_20, COL_MUTED, LV_TEXT_ALIGN_CENTER);
-  metric(2, "CELLS", 32, 221, 88, &lv_font_montserrat_18);
+  metric(2, "CELLS", 14, 221, 88, &lv_font_montserrat_18);
   metric(3, "SPREAD", 136, 221, 88, &lv_font_montserrat_18);
-  metric(4, "TEMP", 240, 221, 88, &lv_font_montserrat_18);
+  metric(4, "TEMP", 258, 221, 88, &lv_font_montserrat_18);
   metric(5, "CAPACITY", 88, 279, 184, &lv_font_montserrat_18);
   metric(6, "HOURS", 88, 324, 184, &lv_font_montserrat_14);
 }
@@ -380,8 +385,10 @@ String clockDateText(const String &localTime) {
   return localTime.substring(0, 10);
 }
 
-String clockTimeText(const String &localTime) {
+String clockTimeText(const Snapshot &s) {
+  const String &localTime = s.localTime;
   if (localTime.length() < 16 || localTime == "--") return "--:--";
+  if (s.use24h) return localTime.substring(11, 16);
   int hour = localTime.substring(11, 13).toInt();
   const int minute = localTime.substring(14, 16).toInt();
   const bool pm = hour >= 12;
@@ -414,7 +421,7 @@ void updateClock(const Snapshot &s) {
     lv_line_set_points(w.minuteHand, w.minutePts, 2);
     lv_line_set_points(w.secondHand, w.secondPts, 2);
   }
-  setText(w.metric[0], clockTimeText(localTime));
+  setText(w.metric[0], clockTimeText(s));
   setText(w.metric[1], clockDateText(localTime));
   setText(w.metric[2], upper(s.mode.length() ? s.mode : "standby"));
 }
@@ -435,6 +442,10 @@ void updateDashboard(const Snapshot &s) {
   setText(w.metric[3], charging ? ampsText(s.chargeAmps) + " in" : String(s.loadPercent, 0) + "%");
   setText(w.metric[4], charging ? s.chargeEta : s.runEta);
   setText(w.metric[5], s.runtimeHours);
+  setText(w.metric[6], s.dischargeWatts > 1.0f ? wattsText(s.dischargeWatts) : "--");
+  setText(w.metric[7], s.chargeWatts > 1.0f ? wattsText(s.chargeWatts) : "--");
+  setTextColor(w.metric[6], charging ? COL_MUTED : COL_TEXT);
+  setTextColor(w.metric[7], charging ? COL_ACCENT : COL_MUTED);
 }
 
 void updatePower(const Snapshot &s) {

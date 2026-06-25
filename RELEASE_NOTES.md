@@ -1,3 +1,30 @@
+# R48Display v0.2.1 — Release Notes
+
+## What's New in 0.2.1
+
+### LVGL Dashboard Layout
+- ETA metric now spans the full top row, wider and easier to read
+- LOAD and HOURS moved to a second row (HOURS left, LOAD right)
+- New bottom row shows **Drain W** and **Charge W** (auto-scales W/kW); Charge watts turns blue (teal accent) when actively charging
+
+### LVGL Battery Page
+- CELLS metric shifted left, TEMP shifted right to clear the round health arc
+
+### Temperature & Time Preferences
+- **Temperature unit** (°F / °C) selector added to Appearance settings — applies to both web UI and LCD display
+- **Clock format** (12h AM/PM / 24h military) added to Time & NTP settings — applies to LCD clock page and all time displays
+- Temperatures reading exactly 0°C (unpopulated probe slots) now show `--` instead of converting to `32°F`
+
+### Hour Meter Settings
+- **Active Hours** and **Working Hours** are now editable in Hour Meter settings (previously read-only in the Details table)
+- Each field includes an inline explanation of how it is calculated
+- Edit to reset counters (set 0) or correct values after maintenance
+
+### Ryobi 48V Field Guide
+- New `docs/RYOBI_48V.md`: installation guide specifically for Ryobi 48V riding mowers with lithium BLE packs, covering wiring, spray-can-cap enclosure, external antenna mod, screen protector sealing, and AI-assisted customization
+
+---
+
 # R48Display v0.2.0 — Release Notes
 
 ## What's New in 0.2.0

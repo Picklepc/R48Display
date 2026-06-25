@@ -54,6 +54,7 @@ struct Snapshot {
   String uptime;
   String firmware;
   String hoursStr;
+  bool use24h = false;
 
   uint32_t themeBg = 0x050605;
   uint32_t themePanel = 0x10170D;

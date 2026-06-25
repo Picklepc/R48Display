@@ -215,6 +215,7 @@ struct AppSettings {
   float chargeMinAmps = 0.5f;
   float nominalPackAh = 100.0f;
   String tempUnit = "F";
+  String timeFormat = "12h";  // "12h" or "24h"
   String timezone = DEFAULT_TZ;
   uint8_t brightness = 210;
   uint16_t displayRotation = 0;
@@ -2160,6 +2161,8 @@ void loadSettings() {
   prefs.begin("r48disp", false);
   settings.hostname = prefs.getString("host", defaultHostname());
   settings.title = prefs.getString("title", settings.title);
+  settings.tempUnit = prefs.getString("tempUnit", settings.tempUnit);
+  settings.timeFormat = prefs.getString("timeFmt", settings.timeFormat);
   settings.apPassword = prefs.getString("apPass", settings.apPassword);
   settings.otaPassword = prefs.getString("otaPass", settings.otaPassword);
   settings.wifiSsid = prefs.getString("ssid", "");
@@ -2178,7 +2181,6 @@ void loadSettings() {
   settings.mowerRunAmps = prefs.getFloat("runAmps", DEFAULT_MOWER_ON_AMPS);
   settings.bladesOnAmps = prefs.getFloat("bladeAmps", DEFAULT_BLADES_ON_AMPS);
   settings.nominalPackAh = prefs.getFloat("packAh", 100.0f);
-  settings.tempUnit = prefs.getString("tempUnit", settings.tempUnit);
   settings.timezone = prefs.getString("tz", settings.timezone);
   settings.brightness = prefs.getUChar("bright", 210);
   settings.displayRotation = normalizeDisplayRotation(prefs.getUShort("rotation", 0));
@@ -2251,6 +2253,7 @@ void saveSettings() {
   prefs.begin("r48disp", false);
   prefs.putString("host", settings.hostname);
   prefs.putString("title", settings.title);
+  prefs.putString("timeFmt", settings.timeFormat);
   prefs.putString("apPass", settings.apPassword);
   prefs.putString("otaPass", settings.otaPassword);
   prefs.putString("ssid", settings.wifiSsid);
@@ -2962,6 +2965,7 @@ void drawDisplay(bool fullRedraw) {
   s.maintOverdue = maintOverdueCount();
   s.touchReady = touchReady;
   s.hoursStr = String(hoursActive, 1) + "h act  " + String(hoursWorking, 1) + "h work";
+  s.use24h = settings.timeFormat == "24h";
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;
@@ -3229,12 +3233,13 @@ void addStatusJson(JsonDocument &doc) {
   JsonArray cells = b["cells"].to<JsonArray>();
   for (uint8_t i = 0; i < bms.cellCount && i < 32; ++i) cells.add(serialized(String(bms.cellVolts[i], 3)));
   JsonArray temps = b["temps"].to<JsonArray>();
-  if (bms.mosTempC != 0.0f || bms.tempCount > 0)
-    temps.add(serialized(String(displayTempC(bms.mosTempC), 1)));
-  if (bms.pcbTempC != 0.0f || bms.tempCount > 1)
-    temps.add(serialized(String(displayTempC(bms.pcbTempC), 1)));
-  for (uint8_t i = 0; i < bms.tempCount && i < 14; ++i)
-    temps.add(serialized(String(displayTempC(bms.tempsC[i]), 1)));
+  auto addTemp = [&](float c) {
+    if (fabsf(c) < 0.5f) temps.add(String("--"));
+    else temps.add(serialized(String(displayTempC(c), 1)));
+  };
+  if (bms.mosTempC != 0.0f || bms.tempCount > 0) addTemp(bms.mosTempC);
+  if (bms.pcbTempC != 0.0f || bms.tempCount > 1) addTemp(bms.pcbTempC);
+  for (uint8_t i = 0; i < bms.tempCount && i < 14; ++i) addTemp(bms.tempsC[i]);
 
   JsonObject hardware = doc["hardware"].to<JsonObject>();
   hardware["display_ready"] = displayReady;
@@ -3328,6 +3333,7 @@ void apiSettingsGet() {
   JsonDocument doc;
   doc["hostname"] = settings.hostname;
   doc["title"] = settings.title;
+  doc["time_format"] = settings.timeFormat;
   doc["ap_ssid"] = apSsid;
   doc["ap_password_set"] = settings.apPassword.length() >= 8;
   doc["ota_password_set"] = settings.otaPassword.length() >= 8;
@@ -3432,9 +3438,13 @@ void apiSettingsPost() {
   if (server.hasArg("label_working") && server.arg("label_working").length() > 0) settings.labelWorking = server.arg("label_working");
   if (server.hasArg("ntp_enabled")) settings.ntpEnabled = server.arg("ntp_enabled") == "1";
   if (server.hasArg("ntp_server")) settings.ntpServer = server.arg("ntp_server");
+  if (server.hasArg("time_format")) settings.timeFormat = server.arg("time_format") == "24h" ? "24h" : "12h";
+  if (server.hasArg("temp_unit")) { const String u = server.arg("temp_unit"); settings.tempUnit = (u == "C") ? "C" : "F"; }
   if (server.hasArg("hours_baseline")) settings.hoursBaseline = max(0.0f, server.arg("hours_baseline").toFloat());
   if (server.hasArg("hours_total")) setHoursTotal(server.arg("hours_total").toFloat());
   if (server.hasArg("runtime_hours")) setHoursTotal(server.arg("runtime_hours").toFloat());
+  if (server.hasArg("hours_active")) hoursActive = max(0.0f, server.arg("hours_active").toFloat());
+  if (server.hasArg("hours_working")) hoursWorking = max(0.0f, server.arg("hours_working").toFloat());
   if (!validUsageCategory(settings.usageCategory)) settings.usageCategory = USAGE_CATEGORIES[0].id;
   if (oldUsage != settings.usageCategory) {
     if (!server.hasArg("theme_id")) settings.themeId = activeUsage().defaultThemeId;
