@@ -459,9 +459,11 @@ function renderTemps(temps, unit) {
     host.innerHTML = '<div class="metric"><div class="label">Temperature</div><div class="value sm">--</div></div>';
     return;
   }
-  host.innerHTML = temps.map((t, i) =>
-    `<div class="metric"><div class="label">${labels[i] || `T${i}`}</div><div class="value sm">${Number.isFinite(Number(t)) ? Number(t).toFixed(1) : '--'} ${unit || '°C'}</div></div>`
-  ).join('');
+  host.innerHTML = temps.map((t, i) => {
+    const v = Number(t);
+    const disp = Number.isFinite(v) ? `${v.toFixed(1)} ${unit || '°C'}` : '--';
+    return `<div class="metric"><div class="label">${labels[i] || `T${i}`}</div><div class="value sm">${disp}</div></div>`;
+  }).join('');
 }
 
 function renderDetails(data) {
@@ -532,8 +534,12 @@ function render(data) {
   text('bh-spread', dg.max_cell_spread_mv !== undefined ? fmtNum(dg.max_cell_spread_mv, 1, ' mV') : '--');
   const minCv = parseFloat(dg.min_cell_voltage_v || 0);
   text('bh-mincell', minCv > 0.1 ? `${minCv.toFixed(3)} V` : '--');
-  const maxT = parseFloat(dg.max_temp_c || 0);
-  text('bh-temp', maxT > 0.1 ? `${maxT.toFixed(1)} °C` : '--');
+  const maxTc = parseFloat(dg.max_temp_c || 0);
+  const bTempUnit = get(data, 'bms.temp_unit', 'C');
+  const maxTDisplay = maxTc > 0.1
+    ? (bTempUnit === 'F' ? `${(maxTc * 9 / 5 + 32).toFixed(1)} °F` : `${maxTc.toFixed(1)} °C`)
+    : '--';
+  text('bh-temp', maxTDisplay);
   text('bh-lv', dg.low_voltage_events !== undefined ? String(dg.low_voltage_events) : '--');
   text('bh-hc', dg.high_current_events !== undefined ? String(dg.high_current_events) : '--');
 

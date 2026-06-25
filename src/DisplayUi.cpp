@@ -303,10 +303,12 @@ void buildPower() {
   w.arcA = ring(w.root, 38, 28, 284, 16, COL_ACCENT);
   w.metric[0] = label(w.root, "--", 75, 114, 210, &lv_font_montserrat_40, COL_TEXT, LV_TEXT_ALIGN_CENTER);
   w.metric[1] = label(w.root, "--", 84, 157, 192, &lv_font_montserrat_20, COL_MUTED, LV_TEXT_ALIGN_CENTER);
-  metric(2, "CELLS", 14, 221, 88, &lv_font_montserrat_18);
-  metric(3, "SPREAD", 136, 221, 88, &lv_font_montserrat_18);
-  metric(4, "TEMP", 258, 221, 88, &lv_font_montserrat_18);
-  metric(5, "CAPACITY", 88, 279, 184, &lv_font_montserrat_18);
+  // Row 1: SPREAD centered, wider
+  metric(3, "SPREAD", 96, 221, 168, &lv_font_montserrat_18);
+  // Row 2: CELLS/TEMP moved inward and down (CAPACITY removed)
+  metric(2, "CELLS", 89, 279, 82, &lv_font_montserrat_18);
+  metric(4, "TEMP", 189, 279, 82, &lv_font_montserrat_18);
+  // Row 3: HOURS
   metric(6, "HOURS", 88, 324, 184, &lv_font_montserrat_14);
 }
 
@@ -357,7 +359,7 @@ void buildStatus() {
   metric(2, "BLE", 35, 120, 290, &lv_font_montserrat_18);
   metric(3, "BMS", 35, 166, 290, &lv_font_montserrat_14);
   metric(4, "BOARD", 35, 211, 135, &lv_font_montserrat_16);
-  metric(5, "PWR", 190, 211, 135, &lv_font_montserrat_16);
+  metric(5, "SAVE", 190, 211, 135, &lv_font_montserrat_16);
   metric(6, "FW", 35, 263, 135, &lv_font_montserrat_16);
   metric(7, "UPTIME", 190, 263, 135, &lv_font_montserrat_16);
   w.metric[8] = label(w.root, "--", 24, 324, 312, &lv_font_montserrat_12, COL_WARN, LV_TEXT_ALIGN_CENTER);
@@ -455,7 +457,6 @@ void updatePower(const Snapshot &s) {
   setText(w.metric[2], s.cellCount ? String(s.cellCount) : "--");
   setText(w.metric[3], s.deltaCellMv > 0.0f ? String(s.deltaCellMv, 0) + "mV" : "--");
   setText(w.metric[4], s.temp);
-  setText(w.metric[5], ahText(s.remainingAh) + " / " + ahText(s.totalAh));
   setText(w.metric[6], s.hoursStr);
 }
 
@@ -465,10 +466,15 @@ void updateStatus(const Snapshot &s) {
   setText(w.metric[2], s.bleLink + " " + String(s.bmsRssi) + "dBm");
   setText(w.metric[3], s.bmsTarget.length() ? s.bmsTarget : s.bmsAddress);
   setText(w.metric[4], s.screenBattery);
-  setText(w.metric[5], s.powerSource);
+  setText(w.metric[5], s.powerSaveEnabled ? "on" : "off");
   setText(w.metric[6], s.firmware);
   setText(w.metric[7], s.uptime);
-  if (s.maintOverdue > 0) {
+  if (s.provisioning && !s.wifiConnected) {
+    const uint8_t step = static_cast<uint8_t>((millis() / 4000) % 3);
+    if (step == 0) setText(w.metric[8], String("Wi-Fi: ") + s.ssid);
+    else if (step == 1) setText(w.metric[8], String("Pass: ") + s.apPassword);
+    else setText(w.metric[8], "Open 192.168.4.1 to set up");
+  } else if (s.maintOverdue > 0) {
     String m = String(s.maintOverdue) + " maintenance item";
     if (s.maintOverdue > 1) m += "s";
     m += " due";

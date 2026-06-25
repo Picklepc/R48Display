@@ -2966,6 +2966,8 @@ void drawDisplay(bool fullRedraw) {
   s.touchReady = touchReady;
   s.hoursStr = String(hoursActive, 1) + "h act  " + String(hoursWorking, 1) + "h work";
   s.use24h = settings.timeFormat == "24h";
+  s.powerSaveEnabled = settings.powerSaveEnabled;
+  s.apPassword = settings.apPassword;
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;

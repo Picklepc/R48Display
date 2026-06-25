@@ -55,6 +55,8 @@ struct Snapshot {
   String firmware;
   String hoursStr;
   bool use24h = false;
+  bool powerSaveEnabled = false;
+  String apPassword;
 
   uint32_t themeBg = 0x050605;
   uint32_t themePanel = 0x10170D;
