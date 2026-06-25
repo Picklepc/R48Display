@@ -28,6 +28,8 @@ detection behavior, and BMS profile from the web settings.
 
 - BLE battery monitoring for the Humsienk / Hoperf WATT profile.
 - BLE battery monitoring for common JBD / Xiaoxiang BLE UART profiles (FF00 and FFE0 variants).
+- BLE battery monitoring for JK BMS (Jikong) packs via FFE0/FFE1.
+- BLE battery monitoring for Daly Smart BMS packs via Modbus-style BLE bridge.
 - BLE scan and selectable BMS target by name/address plus matched protocol.
 - Web dashboard and battery detail, including individual cell voltages.
 - LCD dashboard, load/charge monitor, clock, and status page.
@@ -44,6 +46,8 @@ detection behavior, and BMS profile from the web settings.
 - Temporary AP-only setup mode when no Wi-Fi credentials are saved or BOOT is
   held during startup.
 - OTA update through PlatformIO or the embedded web updater.
+- Optional MQTT publishing for Home Assistant and other automation systems.
+  Opt-in; disabled by default. See [MQTT / Home Assistant](#mqtt--home-assistant).
 - Optional onboard board-battery reading when the variant has that circuit.
 - Optional microphone-assisted work detection for mower installs with the I2S
   microphone. Disabled by default and not required.
@@ -86,26 +90,23 @@ independently.
 
 ## Build
 
-```powershell
-& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -e waveshare_esp32_s3_touch_lcd_1_85
+Install [PlatformIO](https://platformio.org/install/cli) (`pip install platformio`), then:
+
+```sh
+pio run -e waveshare_esp32_s3_touch_lcd_1_85
 ```
 
-To rebuild the distributable test firmware in `firmware/`:
+USB flash (first-time or if OTA is not yet configured):
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package_firmware.ps1
+```sh
+pio run -e waveshare_esp32_s3_touch_lcd_1_85 -t upload --upload-port YOUR_PORT
 ```
 
-USB upload:
+OTA upload after Wi-Fi is configured (edit `upload_port` in `platformio.ini` to
+your device IP):
 
-```powershell
-& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -e waveshare_esp32_s3_touch_lcd_1_85 -t upload --upload-port YOUR_PORT
-```
-
-OTA upload after Wi-Fi is configured:
-
-```powershell
-& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -e waveshare_esp32_s3_touch_lcd_1_85_ota -t upload
+```sh
+pio run -e waveshare_esp32_s3_touch_lcd_1_85_ota -t upload
 ```
 
 ## First Run
@@ -151,6 +152,28 @@ The Maintenance page (`/maintenance`) lets you set reminders tied to working
 hours, active hours, total hours, elapsed days, or BMS cycle count. A progress
 bar shows how close each item is to its interval. When due, items are flagged
 in the web UI and a count appears on the LCD status page.
+
+## MQTT / Home Assistant
+
+Enable MQTT in **Settings → MQTT / Home Assistant**. Enter your broker host, port
+(default 1883), and optional credentials. The topic prefix defaults to
+`r48display/{hostname}`.
+
+When enabled, the firmware:
+- Publishes battery state to `{prefix}/state` on every new BMS reading and on
+  activity state changes (charging ↔ standby ↔ active ↔ working).
+- Publishes cell voltages to `{prefix}/cells` whenever cell data changes.
+- Sends Home Assistant MQTT auto-discovery configs on connect so all entities
+  appear automatically under a single device in HA.
+- Publishes `online` / `offline` to `{prefix}/availability` for HA availability
+  tracking.
+- Sends a heartbeat every 60 s when the BMS is stale or disconnected.
+
+Use **Publish Now** or **Send HA Discovery** in the settings page to trigger
+manual publishes or re-register HA entities after a hostname change.
+
+See [`SECURITY.md`](SECURITY.md) for MQTT security notes (plaintext by default;
+use a local broker or VPN for external access).
 
 ## Internal Battery Power Saving
 

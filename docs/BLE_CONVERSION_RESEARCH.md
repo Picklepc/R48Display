@@ -11,17 +11,20 @@ useful anywhere a large 36-60 V lithium pack needs local visibility: golf carts,
 trailers/RVs, portable power stations, trolling/marine packs, utility carts,
 off-grid cabinets, and custom DIY batteries.
 
-Current firmware test profiles:
+Current firmware profiles (all read-only):
 
 - `humsienk_watt`: validated against the local Humsienk / Hoperf WATT test
   battery.
 - `jbd_xiaoxiang_ff00`: JBD / Xiaoxiang BLE UART modules advertising FF00 with
   FF01 notify and FF02 write.
 - `jbd_xiaoxiang_ffe0`: JBD-style BLE UART modules exposing FFE0/FFE1.
+- `jk_bms_ble`: JK BMS (Jikong) packs on FFE0/FFE1, using JK-specific 20-byte
+  request frames. Parses CELL_INFO (0x96) and DEVICE_INFO (0x97) responses.
+- `daly_bms_ble`: Daly Smart BMS BLE bridge. Modbus RTU framing over the WATT
+  BLE service (AE00/AE01/AE02). Reads registers 0x00–0x51 for full telemetry.
 
-The JBD profiles are read-only test profiles. They poll basic info and cell
-voltage frames and normalize pack voltage, signed current, SOC, capacity, cycle
-count, temperatures, and individual cells into the same telemetry model.
+All five profiles normalize the same telemetry fields. See
+`docs/BMS_PROFILES.md` for the per-profile field availability table.
 
 ## Priority Use Cases
 
@@ -76,16 +79,12 @@ count, temperatures, and individual cells into the same telemetry model.
 
 ## Protocol Targets
 
-- JBD / Xiaoxiang / Overkill-style BLE UART: already implemented as test
-  profiles and likely useful across DIY packs, power stations, and some retail
-  batteries.
-- Daly: high-priority capture target. DALY documents customer UART/485 data IDs
-  in the `0x90`-`0x98` range, but BLE bridge UUIDs vary enough that firmware
-  support should wait for owner captures.
-- JK: high-priority capture target. Do not assume JBD parsing until a real JK
-  BLE advertisement, service UUID, and response frame are captured.
-- Vendor apps such as BAT-BMS, DCHOUSE, and other private-label apps: likely to
-  reuse common protocols, but each needs at least one scan and data capture.
+- JBD / Xiaoxiang / Overkill-style BLE UART: implemented. Stable across FF00 and FFE0 variants.
+- Daly: implemented. BLE bridge uses the WATT service UUIDs (AE00/AE01/AE02) with Modbus framing.
+- JK (Jikong): implemented. Unique 20-byte request header over FFE0/FFE1.
+- DC HOUSE: research in progress. Likely uses JBD-style protocol; app name "DCHOUSE". Needs BLE advertisement capture.
+- Enjoybot: research in progress. Common in Ryobi mower conversions. Needs advertisement and frame capture.
+- Vendor apps such as BAT-BMS and other private-label apps: likely to reuse JBD or JK framing; each needs at least one scan and data capture.
 
 ## Connection Notes
 

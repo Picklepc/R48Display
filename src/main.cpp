@@ -194,6 +194,7 @@ constexpr UsageCategory USAGE_CATEGORIES[] = {
 
 struct AppSettings {
   String hostname;
+  String title;     // display title; empty = derive from hostname
   String apPassword = "r48display";
   String otaPassword = "r48display";
   String wifiSsid;
@@ -566,11 +567,12 @@ String cssColor(uint32_t value) {
 }
 
 String displayTitle() {
-  String title = settings.hostname;
-  title.replace('_', ' ');
-  title.replace('-', ' ');
-  title.trim();
-  return title.length() ? title : String(PROJECT_NAME);
+  if (!settings.title.isEmpty()) return settings.title;
+  String t = settings.hostname;
+  t.replace('_', ' ');
+  t.replace('-', ' ');
+  t.trim();
+  return t.length() ? t : String(PROJECT_NAME);
 }
 
 const char *powerSourceName(PowerSource source) {
@@ -2157,6 +2159,7 @@ void apiMaintenanceDelete() {
 void loadSettings() {
   prefs.begin("r48disp", false);
   settings.hostname = prefs.getString("host", defaultHostname());
+  settings.title = prefs.getString("title", settings.title);
   settings.apPassword = prefs.getString("apPass", settings.apPassword);
   settings.otaPassword = prefs.getString("otaPass", settings.otaPassword);
   settings.wifiSsid = prefs.getString("ssid", "");
@@ -2247,6 +2250,7 @@ void loadSettings() {
 void saveSettings() {
   prefs.begin("r48disp", false);
   prefs.putString("host", settings.hostname);
+  prefs.putString("title", settings.title);
   prefs.putString("apPass", settings.apPassword);
   prefs.putString("otaPass", settings.otaPassword);
   prefs.putString("ssid", settings.wifiSsid);
@@ -2992,7 +2996,7 @@ String commonHead(const String &title) {
   html += escapeHtml(settings.subtitle);
   html += F(" - ");
   html += escapeHtml(title);
-  html += F("</p></div></div><nav><a href='/'>Dashboard</a><a href='/battery'>Battery</a><a href='/maintenance'>Maintenance</a><a href='/settings'>Settings</a><a href='/status'>Status</a></nav></header><main class='wrap'>");
+  html += F("</p></div></div><nav><a href='/'>Dashboard</a><a href='/battery'>Battery</a><a href='/maintenance'>Maintenance</a><a href='/settings'>Settings</a></nav></header><main class='wrap'>");
   return html;
 }
 
@@ -3323,6 +3327,7 @@ void apiStatus() {
 void apiSettingsGet() {
   JsonDocument doc;
   doc["hostname"] = settings.hostname;
+  doc["title"] = settings.title;
   doc["ap_ssid"] = apSsid;
   doc["ap_password_set"] = settings.apPassword.length() >= 8;
   doc["ota_password_set"] = settings.otaPassword.length() >= 8;
@@ -3386,6 +3391,7 @@ void apiSettingsPost() {
   const bool oldNtpEnabled = settings.ntpEnabled;
   const String oldNtpServer = settings.ntpServer;
   if (server.hasArg("hostname")) settings.hostname = sanitizeHostname(server.arg("hostname"));
+  if (server.hasArg("title")) { settings.title = server.arg("title"); settings.title.trim(); if (settings.title.length() > 64) settings.title = settings.title.substring(0, 64); }
   if (server.hasArg("ota_password") && server.arg("ota_password").length() >= 8) settings.otaPassword = server.arg("ota_password");
   if (server.hasArg("wifi_ssid")) settings.wifiSsid = server.arg("wifi_ssid");
   if (server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0) settings.wifiPassword = server.arg("wifi_password");
@@ -3652,7 +3658,7 @@ void setupRoutes() {
   server.on("/battery", HTTP_GET, []() { sendPage("Battery", R48Web::batteryBody); });
   server.on("/maintenance", HTTP_GET, []() { sendPage("Maintenance", R48Web::maintenanceBody); });
   server.on("/settings", HTTP_GET, []() { sendPage("Settings", R48Web::settingsBody); });
-  server.on("/status", HTTP_GET, []() { sendPage("Status", R48Web::statusBody); });
+  server.on("/status", HTTP_GET, []() { server.sendHeader("Location", "/", true); server.send(302, "text/plain", ""); });
   server.on("/update", HTTP_GET, []() { server.sendHeader("Location", "/settings"); server.send(302); });
   server.on("/update", HTTP_POST, handleUpdatePostDone, handleUpdateUpload);
   server.on("/theme.css", HTTP_GET, []() { server.send(200, "text/css", themeCss()); });

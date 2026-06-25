@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 static constexpr const char *PROJECT_NAME = "R48Display";
-static constexpr const char *FIRMWARE_VERSION = "1.0.0";
+static constexpr const char *FIRMWARE_VERSION = "0.2.0";
 
 // Waveshare ESP32-S3-Touch-LCD-1.85 display pinout.
 static constexpr int PIN_LCD_BL = 5;

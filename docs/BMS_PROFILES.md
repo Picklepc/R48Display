@@ -8,23 +8,78 @@ The goal is broad compatibility across large lithium packs used in mowers, golf
 carts, trailers/RVs, portable power stations, marine/trolling batteries, utility
 carts, off-grid cabinets, and custom 36-60 V builds.
 
-Current firmware profiles:
+## Supported Profiles
 
-- `humsienk_watt`: stable local profile based on the read-only WATT BLE protocol
-  documented in `docs/humsienk_ble_protocol.md`.
-- `jbd_xiaoxiang_ff00`: test profile for JBD / Xiaoxiang BLE UART modules that
-  advertise service `0000ff00-0000-1000-8000-00805f9b34fb`, notify on FF01, and
-  write on FF02.
-- `jbd_xiaoxiang_ffe0`: test profile for JBD-style BLE UART modules that expose
-  service `0000ffe0-0000-1000-8000-00805f9b34fb` and data characteristic FFE1.
+### `humsienk_watt` — Humsienk / Hoperf WATT BLE
+Stable profile validated locally. Read-only. Connects to service
+`0000ae00-0000-1000-8000-00805f9b34fb`, authenticates with "HiLink", receives
+notify on AE01, writes on AE02. Full protocol documented in
+`docs/humsienk_ble_protocol.md`.
 
-The JBD test profiles read command `0x03` for basic info and command `0x04` for
-cell voltages. They do not write settings, change Bluetooth module names, toggle
-MOSFETs, or alter protection parameters.
+### `jbd_xiaoxiang_ff00` — JBD / Xiaoxiang BLE UART (FF00 variant)
+Promoted stable. Service `0000ff00-0000-1000-8000-00805f9b34fb`, notify FF01,
+write FF02. Polls `0x03` (basic info) and `0x04` (cell voltages). Read-only;
+does not write settings or toggle MOSFETs.
+
+### `jbd_xiaoxiang_ffe0` — JBD / Xiaoxiang BLE UART (FFE0 variant)
+Promoted stable. Service `0000ffe0-0000-1000-8000-00805f9b34fb`, notify+write
+FFE1. Same command set as the FF00 variant (0x03 / 0x04). Read-only.
+
+### `jk_bms_ble` — JK BMS (Jikong) BLE
+Implemented. Service `0000ffe0-0000-1000-8000-00805f9b34fb`, notify+write FFE1.
+Uses the JK 20-byte request header `AA 55 90 EB [cmd] 00…` and expects responses
+starting with `55 AA EB 90`. Parses `CELL_INFO (0x96)` for voltages, current,
+temperature, SOC, Ah, and cycles; and `DEVICE_INFO (0x97)` for software version
+and serial. Read-only.
+
+### `daly_bms_ble` — Daly Smart BMS BLE
+Implemented. Service `0000ae00-0000-1000-8000-00805f9b34fb`, notify AE01, write
+AE02. Modbus-style framing: request `D2 03 [addr_hi] [addr_lo] [cnt_hi] [cnt_lo]
+[crc_lo] [crc_hi]`; response `D2 03 [len] [data…] [crc_lo] [crc_hi]`. Reads
+registers `0x00`–`0x51`: cell voltages, temperatures, pack voltage, signed
+current, SOC, remaining Ah, cycle count, and balance state. Read-only.
 
 Candidate future profiles are tracked in `docs/BLE_CONVERSION_RESEARCH.md`.
 That file is research and backlog material, not a list of currently supported
 protocols.
+
+## Degradation Metric Availability by Profile
+
+Fields marked **N** are provided natively by the BMS. Fields marked **C** are
+computed locally from other native fields. Fields marked **—** are not available
+from this protocol and fall back to zero.
+
+| Field | humsienk_watt | jbd_ff00 | jbd_ffe0 | jk_bms_ble | daly_bms_ble |
+|---|:---:|:---:|:---:|:---:|:---:|
+| SOC | N | N | N | N | N |
+| Pack voltage | N | N | N | N | N |
+| Signed current | N | N | N | N | N |
+| Remaining Ah | N | N | N | N | C (SOC÷100×total) |
+| Total Ah | N | N | N | N | C |
+| Cycle count | — | N | N | N | N |
+| Cell voltages | N | N | N | N | N |
+| Cell count | N | N | N | N | N |
+| Cell delta (spread) | N | C | C | C | C/N† |
+| MOS temperature | — | N | N | N | N (probe 0) |
+| PCB temperature | — | N | N | N | N (probe 1) |
+| Additional temps | — | N | N | N (probe T2) | N (probes 2+) |
+| Balance state | N | N | N | N | N |
+| Warning bits | N | N | N | — | — |
+| Software version | — | N | N | N | — |
+| Manufacturer/serial | — | N | N | N | — |
+| Capacity fade % | local | local | local | local | local |
+| Max cell spread (lifetime) | local | local | local | local | local |
+| Min cell voltage (lifetime) | local | local | local | local | local |
+| Max temp (lifetime) | local | local | local | local | local |
+| Low voltage events | local | local | local | local | local |
+| High current events | local | local | local | local | local |
+
+† Daly natively reports cell delta in extended registers (`0x73`, registers
+115-116); falls back to computed spread when those registers are absent.
+
+All "local" fields are tracked by `updateDegradation()` in firmware regardless
+of protocol, provided the underlying cell voltage, current, or temperature fields
+are populated.
 
 ## Normalized Telemetry
 

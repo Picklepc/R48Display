@@ -41,6 +41,30 @@ String dashboardBody() {
       "<div class='metric'><div class='label'>LV Events</div><div class='value' id='bh-lv'>--</div></div>"
       "<div class='metric'><div class='label'>HC Events</div><div class='value' id='bh-hc'>--</div></div>"
       "</div>"
+      "</section>"
+      // System status card
+      "<section class='card'>"
+      "<h2>System</h2>"
+      "<div class='dash-strip'>"
+      "<div class='metric'><div class='label'>Firmware</div><div class='value sm' id='sys-fw'>--</div></div>"
+      "<div class='metric'><div class='label'>Uptime</div><div class='value sm' id='sys-uptime'>--</div></div>"
+      "<div class='metric'><div class='label'>Hostname</div><div class='value sm' id='sys-host'>--</div></div>"
+      "<div class='metric'><div class='label'>IP Address</div><div class='value sm' id='sys-ip'>--</div></div>"
+      "<div class='metric'><div class='label'>Wi-Fi</div><div class='value sm' id='sys-wifi'>--</div></div>"
+      "<div class='metric'><div class='label'>NTP Clock</div><div class='value sm' id='sys-ntp'>--</div></div>"
+      "</div>"
+      "</section>"
+      // Device power + MQTT status card
+      "<section class='card'>"
+      "<h2>Device</h2>"
+      "<div class='dash-strip'>"
+      "<div class='metric'><div class='label'>Board Battery</div><div class='value sm' id='sys-bat'>--</div></div>"
+      "<div class='metric'><div class='label'>Power Source</div><div class='value sm' id='sys-pwr'>--</div></div>"
+      "<div class='metric'><div class='label'>Power Save</div><div class='value sm' id='sys-save'>--</div></div>"
+      "<div class='metric'><div class='label'>Heap Free</div><div class='value sm' id='sys-heap'>--</div></div>"
+      "<div class='metric'><div class='label'>MQTT</div><div class='value sm' id='sys-mqtt'>--</div></div>"
+      "<div class='metric'><div class='label'>BLE Policy</div><div class='value sm' id='sys-ble-pol'>--</div></div>"
+      "</div>"
       "</section>");
 }
 
@@ -130,6 +154,26 @@ String settingsBody() {
       "<div id='wifi-results' class='list'></div>"
       "</div>"
 
+      // System — identity fields directly after WiFi
+      "<div class='settings-group'>"
+      "<h3>System</h3>"
+      "<div class='form-grid'>"
+      "<label>Display Title<input name='title' autocomplete='off' placeholder='Ryobi Mower (leave blank to use hostname)'></label>"
+      "<label>Hostname (network / mDNS)<input name='hostname' autocomplete='off' placeholder='ryobi'></label>"
+      "<label>OTA Password<input name='ota_password' type='password' autocomplete='new-password'></label>"
+      "</div>"
+      "</div>"
+
+      // Time & NTP — after System, before BMS (clock is network-adjacent)
+      "<div class='settings-group'>"
+      "<h3>Time &amp; NTP</h3>"
+      "<div class='form-grid'>"
+      "<label>Timezone (POSIX)<input name='timezone' autocomplete='off' placeholder='PST8PDT,M3.2.0,M11.1.0'></label>"
+      "<label>NTP Server<input name='ntp_server' autocomplete='off' placeholder='pool.ntp.org'></label>"
+      "<label class='check'><input name='ntp_enabled' type='checkbox'> Enable NTP time sync</label>"
+      "</div>"
+      "</div>"
+
       // Battery / BMS
       "<div class='settings-group'>"
       "<h3>Battery Monitor (BMS)</h3>"
@@ -154,8 +198,8 @@ String settingsBody() {
       "<div class='form-grid'>"
       "<label>Usage Category<select name='usage_category' id='usage-category'></select></label>"
       "<label>Color Scheme<select name='theme_id' id='theme-select'></select><span class='hint' id='theme-description'></span></label>"
-      "<label>System Label<input name='mower_model' autocomplete='off' placeholder='cart, mower, trailer, pack name'></label>"
-      "<label>Display Subtitle<input name='subtitle' autocomplete='off' placeholder='Fresh electrons, suspiciously organized.'></label>"
+      "<label>Pack / Vehicle Label<input name='mower_model' autocomplete='off' placeholder='e.g. 48V Ryobi Mower Pack'></label>"
+      "<label>Page Subtitle<input name='subtitle' autocomplete='off' placeholder='Fresh electrons, suspiciously organized.'></label>"
       "<label>Brightness<input name='brightness' type='range' min='20' max='255'></label>"
       "<label>Display Rotation<select name='display_rotation'>"
       "<option value='0'>0&deg; (default)</option>"
@@ -186,6 +230,17 @@ String settingsBody() {
       "<label class='check'><input name='work_detection' type='checkbox'> Work / surge detection</label>"
       "<label class='check'><input name='feature_mic' type='checkbox'> Audio assist (blade detection)</label>"
       "<label>Audio Assist Threshold<input name='mic_run_threshold' type='number' min='100' max='12000' step='50'></label>"
+      "</div>"
+      "</div>"
+
+      // Hour Meter — after Activity since thresholds drive what gets counted
+      "<div class='settings-group'>"
+      "<h3>Hour Meter</h3>"
+      "<p class='hint' style='margin-bottom:10px'>Baseline is the original meter reading at installation. Counted hours accumulate from BMS-confirmed states.</p>"
+      "<div class='form-grid'>"
+      "<label>Original Hours At Install<input name='hours_baseline' type='number' min='0' max='99999' step='any'></label>"
+      "<label>Total Displayed Hours<input name='hours_total' type='number' min='0' max='99999' step='any'></label>"
+      "<label>Counted Hours<input name='hours_counted' readonly></label>"
       "</div>"
       "</div>"
 
@@ -220,36 +275,6 @@ String settingsBody() {
       "</div>"
       "</div>"
 
-      // Time & NTP
-      "<div class='settings-group'>"
-      "<h3>Time &amp; NTP</h3>"
-      "<div class='form-grid'>"
-      "<label>Timezone (POSIX)<input name='timezone' autocomplete='off' placeholder='PST8PDT,M3.2.0,M11.1.0'></label>"
-      "<label>NTP Server<input name='ntp_server' autocomplete='off' placeholder='pool.ntp.org'></label>"
-      "<label class='check'><input name='ntp_enabled' type='checkbox'> Enable NTP time sync</label>"
-      "</div>"
-      "</div>"
-
-      // System
-      "<div class='settings-group'>"
-      "<h3>System</h3>"
-      "<div class='form-grid'>"
-      "<label>Hostname<input name='hostname' autocomplete='off'></label>"
-      "<label>OTA Password<input name='ota_password' type='password' autocomplete='new-password'></label>"
-      "</div>"
-      "</div>"
-
-      // Hour Meter
-      "<div class='settings-group'>"
-      "<h3>Hour Meter</h3>"
-      "<p class='hint' style='margin-bottom:10px'>Baseline is the original meter reading at installation. Counted hours accumulate from BMS-confirmed states.</p>"
-      "<div class='form-grid'>"
-      "<label>Original Hours At Install<input name='hours_baseline' type='number' min='0' max='99999' step='any'></label>"
-      "<label>Total Displayed Hours<input name='hours_total' type='number' min='0' max='99999' step='any'></label>"
-      "<label>Counted Hours<input name='hours_counted' readonly></label>"
-      "</div>"
-      "</div>"
-
       "</form>"
 
       // OTA card (separate form, multipart)
@@ -264,22 +289,6 @@ String settingsBody() {
       "<p class='hint' style='margin-top:10px'>Embedded OTA updater. Select the compiled .bin and click Upload. The device reboots automatically after a successful flash.</p>"
       "</div>"
 
-      "</section>");
-}
-
-String statusBody() {
-  return F(
-      "<section class='grid'>"
-      "<div class='metric'><div class='label'>Firmware</div><div class='value sm' id='status-fw'>--</div></div>"
-      "<div class='metric'><div class='label'>Uptime</div><div class='value sm' id='status-uptime'>--</div></div>"
-      "<div class='metric'><div class='label'>Wi-Fi</div><div class='value sm' id='status-wifi'>--</div></div>"
-      "<div class='metric'><div class='label'>IP</div><div class='value sm' id='status-ip'>--</div></div>"
-      "<div class='metric'><div class='label'>BLE</div><div class='value sm' id='status-ble'>--</div></div>"
-      "<div class='metric'><div class='label'>Board Power</div><div class='value sm' id='status-board'>--</div></div>"
-      "</section>"
-      "<section class='card'>"
-      "<h2>Details</h2>"
-      "<table><tbody id='details'></tbody></table>"
       "</section>");
 }
 
@@ -556,12 +565,19 @@ function render(data) {
   text('diag-last-error', lastErr);
   text('diag-frame-hex', get(data, 'bms.frame_hex', '--'));
 
-  text('status-fw', get(data, 'firmware'));
-  text('status-uptime', get(data, 'uptime'));
-  text('status-wifi', `${get(data, 'wifi.ssid')} ${get(data, 'wifi.rssi')} dBm`);
-  text('status-ip', get(data, 'wifi.ip') || get(data, 'wifi.ap_ip'));
-  text('status-ble', `${get(data, 'bms.link')} ${get(data, 'bms.status')}`);
-  text('status-board', get(data, 'screen_battery.label'));
+  // System & Device status cards (dashboard footer)
+  text('sys-fw', `${get(data, 'firmware')} — ${get(data, 'project')}`);
+  text('sys-uptime', get(data, 'uptime'));
+  text('sys-host', (() => { const h = get(data, 'hostname'); const m = get(data, 'wifi.mdns', ''); return m ? `${h} (${m})` : h; })());
+  text('sys-ip', get(data, 'wifi.ip') || get(data, 'wifi.ap_ip') || '--');
+  text('sys-wifi', `${get(data, 'wifi.ssid') || get(data, 'wifi.mode')} ${get(data, 'wifi.rssi')} dBm`);
+  text('sys-ntp', get(data, 'clock.ntp_configured') ? `✓ ${get(data, 'clock.ntp_server')}` : 'disabled');
+  text('sys-bat', get(data, 'screen_battery.label') || '--');
+  text('sys-pwr', get(data, 'screen_battery.power_source') || '--');
+  text('sys-save', get(data, 'screen_battery.power_save_enabled') ? 'on' : 'off');
+  text('sys-heap', (() => { const h = Number(get(data, 'hardware.free_heap', 0)); return h > 0 ? `${Math.round(h / 1024)} KB` : '--'; })());
+  text('sys-mqtt', get(data, 'mqtt.status') || (get(data, 'mqtt.enabled') ? 'enabled' : 'disabled'));
+  text('sys-ble-pol', `${get(data, 'bms.policy') || '--'}`);
   renderDetails(data);
 }
 

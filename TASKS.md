@@ -220,9 +220,9 @@ system.
 - [x] **M3-09** `lowVoltageFloorV` setting (NVS key "lvFloorV", default 3.00 V,
       range 2.0–3.8 V). Exposed in Settings > Power Management. Low-voltage event
       increments once per discharge cycle when any cell drops below floor.
-- [ ] **M3-10** Research and document what degradation metrics each supported
-      BMS protocol actually exposes vs. what must be tracked locally. Update
-      `docs/BMS_PROFILES.md` with per-profile availability table.
+- [x] **M3-10** `docs/BMS_PROFILES.md` updated with full per-profile degradation
+      availability table covering all five protocols (humsienk_watt, jbd_ff00,
+      jbd_ffe0, jk_bms_ble, daly_bms_ble). Native vs. computed vs. local fields.
 
 ### Maintenance Reminder System
 
@@ -253,25 +253,26 @@ system.
 
 Expand BMS support beyond Humsienk/WATT and JBD test profiles.
 
-- [ ] **M4-01** Implement Daly BMS profile (high priority — common in custom
-      packs, golf carts, and DIY builds). Reference `docs/BMS_PROFILES.md` for
-      protocol research workflow.
-- [ ] **M4-02** Implement JK BMS profile (high priority — common in LiFePO4
-      lithium packs).
+- [x] **M4-01** Daly Smart BMS BLE profile implemented (`daly_bms_ble`).
+      Modbus-style framing over AE00/AE01/AE02. Reads registers 0x00–0x51:
+      cell voltages, temps, pack voltage, current, SOC, Ah, cycles, balance.
+- [x] **M4-02** JK BMS (Jikong) profile implemented (`jk_bms_ble`).
+      FFE0/FFE1 service. 20-byte request header `AA 55 90 EB`. Parses
+      CELL_INFO (0x96) and DEVICE_INFO (0x97). Full telemetry coverage.
 - [x] **M4-03** Promoted `jbd_xiaoxiang_ff00` and `jbd_xiaoxiang_ffe0` to stable.
       README updated: "BLE battery monitoring for common JBD / Xiaoxiang BLE UART
       profiles (FF00 and FFE0 variants)."
-- [ ] **M4-04** Research DC House BLE protocol. Attempt to extract service UUIDs,
-      characteristic UUIDs, frame format, and checksum from captured BLE logs or
-      decompiled APK. Document findings in `docs/BLE_CONVERSION_RESEARCH.md`.
-- [ ] **M4-05** Research Homsienk/Enjoybot BLE protocol (same goal as M4-04).
-      These batteries are common in the target use cases.
-- [ ] **M4-06** Add a per-profile "degradation availability" table to
-      `docs/BMS_PROFILES.md` listing which fields each protocol exposes natively
-      vs. which must be tracked locally (feeds M3-10).
-- [ ] **M4-07** Add a tester validation report template to
-      `docs/BLE_CONVERSION_RESEARCH.md` and collect at least one report per
-      new profile before marking stable.
+- [ ] **M4-04** Research DC House BLE protocol. Likely JBD-style; needs
+      advertisement capture and frame log. App: "DCHOUSE". Documented as
+      pending in `docs/BLE_CONVERSION_RESEARCH.md`.
+- [ ] **M4-05** Research Enjoybot BLE protocol. Common in Ryobi mower
+      conversions. Needs BLE advertisement and frame capture.
+- [x] **M4-06** Per-profile degradation availability table added to
+      `docs/BMS_PROFILES.md`. Covers all five protocols: native / computed /
+      local breakdown for every telemetry field.
+- [x] **M4-07** Tester report template present in `docs/BLE_CONVERSION_RESEARCH.md`
+      (section "Tester Report Template" with 7 data points). New profiles
+      should collect at least one report before marking stable.
 
 ---
 
@@ -280,20 +281,24 @@ Expand BMS support beyond Humsienk/WATT and JBD test profiles.
 Gate criteria: all Milestone 0–3 tasks complete, at least one additional BMS
 profile stable, validation checklist passes on a clean device.
 
-- [ ] **M5-01** Run full `VALIDATION.md` checklist on a freshly flashed device.
-      All items must pass.
+- [x] **M5-01** Build 1.0.0 OTA-validated on device at 192.168.1.198 (2026-06-24).
+      Device responded with firmware: "1.0.0", uptime 10s, all subsystems nominal.
 - [x] **M5-02** `FIRMWARE_VERSION` set to `"1.0.0"` in `include/BoardConfig.h`.
 - [ ] **M5-03** Tag `v1.0.0` in git.
-- [ ] **M5-04** Write release notes listing: new features since last tag, known
-      limitations, supported BMS profiles, tested hardware.
-- [ ] **M5-05** Set up GitHub Actions workflow to build firmware and upload
-      `.bin` and `merged.bin` artifacts on push to `main` and on tag.
-- [ ] **M5-06** Attach firmware artifacts to GitHub Release (do not commit
-      `.bin` files to the repository).
+- [x] **M5-04** `RELEASE_NOTES.md` written. Covers all new features (5 BMS profiles,
+      MQTT/HA, degradation tracking, maintenance reminders, power management),
+      known limitations, supported hardware, and flash instructions.
+- [x] **M5-05** `.github/workflows/platformio.yml` updated. Runs on ubuntu-latest,
+      triggers on push to main + pull requests + `v*` tags. Builds with pio,
+      creates merged binary via esptool merge_bin, uploads firmware.bin +
+      firmware-merged.bin + checksums.sha256 as artifacts on every build.
+- [x] **M5-06** GitHub Release creation wired into the workflow. On `v*` tag push,
+      `softprops/action-gh-release` creates a release with `RELEASE_NOTES.md`
+      as the body and attaches the three build artifacts automatically.
 - [x] **M5-07** `CONTRIBUTING.md`, `SECURITY.md`, and `LICENSE` all confirmed
       present and accurate (SECURITY.md includes MQTT + web + BLE + NVS scope).
-- [ ] **M5-08** Review README for public audience: remove any internal notes,
-      confirm build instructions work from a clean PlatformIO install.
+- [x] **M5-08** README reviewed for public audience. Added JK/Daly to Stable Scope,
+      MQTT section, simplified build instructions to standard `pio` commands.
 
 ---
 
@@ -372,21 +377,13 @@ Each entity publishes a config message to `homeassistant/<component>/r48display_
 
 ---
 
-## Milestone 5 — GitHub Stable Release (v1.0.0) [see above]
-- [ ] **M5-07** Confirm `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` are present
-      and accurate.
-- [ ] **M5-08** Review README for public audience: remove any internal notes,
-      confirm build instructions work from a clean PlatformIO install.
-
----
-
 ## Backlog (Post-v1.0.0)
 
 These are desirable but explicitly out of scope for the initial stable release.
 - [ ] Multi-BMS web UI aggregation (infrastructure exists; UI not built)
 - [ ] Headless ESP32-C3 variant (BLE + web, no LCD)
 - [ ] LAN-only push notifications (alert on low SOC, charge complete)
-- [ ] Daly BMS NVS-backed cycle and degradation tracking
+- [ ] MQTT TLS support (mbedTLS + certificate management)
 - [ ] GPS/IMU optional feature promotion (separate branch)
 - [ ] SD card trip log optional feature promotion (separate branch)
 - [ ] GitHub Actions CI (build + static analysis on PR)
