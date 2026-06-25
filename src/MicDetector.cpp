@@ -77,7 +77,7 @@ void configure(bool enabled, float threshold) {
 void loop(bool packCurrentActive) {
   if (!state.enabled || !state.ready || millis() - state.lastReadMs < 250) return;
 
-  int16_t samples[256]{};
+  static int16_t samples[256];
   size_t bytesRead = 0;
   const esp_err_t result = i2s_read(I2S_NUM_0, samples, sizeof(samples), &bytesRead, 0);
   state.lastReadMs = millis();

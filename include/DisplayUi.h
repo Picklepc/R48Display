@@ -22,7 +22,9 @@ struct Snapshot {
   float chargeAmps = 0.0f;
   float healthPercent = 0.0f;
   float remainingAh = 0.0f;
+  float totalAh = 0.0f;
   float designAh = 0.0f;
+  uint8_t cellCount = 0;
   String mode;
   String runEta;
   String chargeEta;
@@ -41,12 +43,17 @@ struct Snapshot {
   String bmsTarget;
   String bmsAddress;
   String lastError;
+  String bmsStatus;
 
   String screenBattery;
+  String powerSource;
+  String mqttStatus;
+  uint8_t maintOverdue = 0;
   bool touchReady = false;
   String localTime;
   String uptime;
   String firmware;
+  String hoursStr;
 
   uint32_t themeBg = 0x050605;
   uint32_t themePanel = 0x10170D;
@@ -63,7 +70,6 @@ struct Snapshot {
 
 void begin(Arduino_GFX *display);
 void draw(const Snapshot &s);
-void tick();
+void tick(bool sleeping = false);
 
 }  // namespace R48DisplayUi
-

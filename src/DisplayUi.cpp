@@ -129,6 +129,10 @@ String wattsText(float watts) {
   return String(watts, 0) + "W";
 }
 
+String ahText(float ah) {
+  return ah > 0.1f ? String(ah, ah >= 100.0f ? 0 : 1) + "Ah" : "--";
+}
+
 uint32_t statusColor(const Snapshot &s) {
   if (s.chargeAmps > 0.2f) return COL_PRIMARY;
   if (s.dischargeAmps > 1.0f) return COL_ACCENT;
@@ -286,20 +290,20 @@ void buildDashboard() {
   lv_obj_set_style_border_width(w.statusDot, 0, 0);
   w.metric[2] = label(w.status, "--", 30, 8, 112, &lv_font_montserrat_16, COL_PRIMARY, LV_TEXT_ALIGN_CENTER);
 
-  metric(3, "LOAD", 70, 242, 88, &lv_font_montserrat_18);
-  metric(4, "HEALTH", 202, 242, 88, &lv_font_montserrat_18);
-  w.barA = bar(w.root, 74, 318, 212, 12, COL_PRIMARY);
+  metric(3, "LOAD", 32, 242, 88, &lv_font_montserrat_18);
+  metric(4, "ETA", 136, 242, 88, &lv_font_montserrat_18);
+  metric(5, "HOURS", 240, 242, 88, &lv_font_montserrat_18);
 }
 
 void buildPower() {
   w.arcA = ring(w.root, 38, 28, 284, 16, COL_ACCENT);
   w.metric[0] = label(w.root, "--", 75, 114, 210, &lv_font_montserrat_40, COL_TEXT, LV_TEXT_ALIGN_CENTER);
   w.metric[1] = label(w.root, "--", 84, 157, 192, &lv_font_montserrat_20, COL_MUTED, LV_TEXT_ALIGN_CENTER);
-  metric(2, "AMPS", 62, 221, 84, &lv_font_montserrat_18);
-  metric(3, "ETA", 151, 221, 84, &lv_font_montserrat_18);
-  metric(4, "HOURS", 240, 221, 84, &lv_font_montserrat_18);
-  metric(5, "SESSION", 88, 279, 184, &lv_font_montserrat_18);
-  w.barA = bar(w.root, 72, 329, 216, 12, COL_ACCENT);
+  metric(2, "CELLS", 32, 221, 88, &lv_font_montserrat_18);
+  metric(3, "SPREAD", 136, 221, 88, &lv_font_montserrat_18);
+  metric(4, "TEMP", 240, 221, 88, &lv_font_montserrat_18);
+  metric(5, "CAPACITY", 88, 279, 184, &lv_font_montserrat_18);
+  metric(6, "HOURS", 88, 324, 184, &lv_font_montserrat_14);
 }
 
 void buildClock() {
@@ -349,7 +353,7 @@ void buildStatus() {
   metric(2, "BLE", 35, 120, 290, &lv_font_montserrat_18);
   metric(3, "BMS", 35, 166, 290, &lv_font_montserrat_14);
   metric(4, "BOARD", 35, 211, 135, &lv_font_montserrat_16);
-  metric(5, "TOUCH", 190, 211, 135, &lv_font_montserrat_16);
+  metric(5, "PWR", 190, 211, 135, &lv_font_montserrat_16);
   metric(6, "FW", 35, 263, 135, &lv_font_montserrat_16);
   metric(7, "UPTIME", 190, 263, 135, &lv_font_montserrat_16);
   w.metric[8] = label(w.root, "--", 24, 324, 312, &lv_font_montserrat_12, COL_WARN, LV_TEXT_ALIGN_CENTER);
@@ -412,7 +416,7 @@ void updateClock(const Snapshot &s) {
   }
   setText(w.metric[0], clockTimeText(localTime));
   setText(w.metric[1], clockDateText(localTime));
-  setText(w.metric[2], s.wifiConnected ? s.ssid + "  " + s.ip : s.provisioning ? "SETUP AP  " + s.ip : "WIFI OFFLINE");
+  setText(w.metric[2], upper(s.mode.length() ? s.mode : "standby"));
 }
 
 void updateDashboard(const Snapshot &s) {
@@ -429,22 +433,21 @@ void updateDashboard(const Snapshot &s) {
   setTextColor(w.metric[2], statusColor(s));
   setBgColor(w.statusDot, statusColor(s));
   setText(w.metric[3], charging ? ampsText(s.chargeAmps) + " in" : String(s.loadPercent, 0) + "%");
-  setText(w.metric[4], s.healthPercent > 0.0f ? String(s.healthPercent, 0) + "%" : "--");
-  setBar(w.barA, s.socValid ? s.soc : 0);
+  setText(w.metric[4], charging ? s.chargeEta : s.runEta);
+  setText(w.metric[5], s.runtimeHours);
 }
 
 void updatePower(const Snapshot &s) {
-  const bool charging = s.chargeAmps > 0.2f;
-  const float ringValue = charging ? constrain(s.chargeAmps * 4.0f, 0.0f, 100.0f) : s.loadPercent;
-  setRing(w.arcA, ringValue);
-  setRingColor(w.arcA, charging ? COL_PRIMARY : COL_ACCENT);
-  setText(w.metric[0], charging ? wattsText(s.chargeWatts) : wattsText(s.dischargeWatts));
-  setText(w.metric[1], charging ? "charging" : upper(s.mode));
-  setText(w.metric[2], charging ? ampsText(s.chargeAmps) + " in" : ampsText(s.dischargeAmps));
-  setText(w.metric[3], charging ? s.chargeEta : s.runEta);
-  setText(w.metric[4], s.runtimeHours);
-  setText(w.metric[5], s.rideTime);
-  setBar(w.barA, ringValue);
+  const float health = s.healthPercent > 0.0f ? s.healthPercent : 0.0f;
+  setRing(w.arcA, health);
+  setRingColor(w.arcA, health >= 80.0f ? COL_PRIMARY : health >= 60.0f ? COL_WARN : COL_BAD);
+  setText(w.metric[0], health > 0.0f ? String(health, 0) + "%" : "--");
+  setText(w.metric[1], "battery health");
+  setText(w.metric[2], s.cellCount ? String(s.cellCount) : "--");
+  setText(w.metric[3], s.deltaCellMv > 0.0f ? String(s.deltaCellMv, 0) + "mV" : "--");
+  setText(w.metric[4], s.temp);
+  setText(w.metric[5], ahText(s.remainingAh) + " / " + ahText(s.totalAh));
+  setText(w.metric[6], s.hoursStr);
 }
 
 void updateStatus(const Snapshot &s) {
@@ -453,10 +456,19 @@ void updateStatus(const Snapshot &s) {
   setText(w.metric[2], s.bleLink + " " + String(s.bmsRssi) + "dBm");
   setText(w.metric[3], s.bmsTarget.length() ? s.bmsTarget : s.bmsAddress);
   setText(w.metric[4], s.screenBattery);
-  setText(w.metric[5], s.touchReady ? "ready" : "missing");
+  setText(w.metric[5], s.powerSource);
   setText(w.metric[6], s.firmware);
   setText(w.metric[7], s.uptime);
-  setText(w.metric[8], s.lastError);
+  if (s.maintOverdue > 0) {
+    String m = String(s.maintOverdue) + " maintenance item";
+    if (s.maintOverdue > 1) m += "s";
+    m += " due";
+    setText(w.metric[8], m);
+  } else if (s.mqttStatus.length() && s.mqttStatus != "MQTT connected") {
+    setText(w.metric[8], s.mqttStatus);
+  } else {
+    setText(w.metric[8], s.lastError.length() ? s.lastError : s.bmsStatus);
+  }
 }
 
 void updateRows(const Snapshot &s) {
@@ -486,7 +498,7 @@ void begin(Arduino_GFX *display) {
   lastTickMs = millis();
 }
 
-void tick() {
+void tick(bool sleeping) {
   if (!lvReady) return;
   const uint32_t now = millis();
   const uint32_t delta = now - lastTickMs;
@@ -494,7 +506,8 @@ void tick() {
     lv_tick_inc(delta);
     lastTickMs = now;
   }
-  if (now - lastHandlerMs >= LV_HANDLER_MS) {
+  const uint32_t interval = sleeping ? 500u : LV_HANDLER_MS;
+  if (now - lastHandlerMs >= interval) {
     lv_timer_handler();
     lastHandlerMs = now;
   }

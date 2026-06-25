@@ -6,6 +6,7 @@ namespace R48Web {
 
 String dashboardBody();
 String batteryBody();
+String maintenanceBody();
 String settingsBody();
 String statusBody();
 String updateBody();

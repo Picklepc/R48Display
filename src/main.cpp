@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <vector>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -11,6 +12,7 @@
 #include <time.h>
 
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <esp_wifi.h>
 
 #include <Arduino_GFX_Library.h>
@@ -19,6 +21,7 @@
 #include "BoardConfig.h"
 #include "DisplayUi.h"
 #include "MicDetector.h"
+#include "MqttClient.h"
 #include "WebPages.h"
 
 namespace {
@@ -31,11 +34,17 @@ constexpr uint32_t WIFI_RETRY_MS = 30000;
 constexpr uint32_t DISPLAY_REFRESH_MS = 2500;
 constexpr uint32_t DISPLAY_CLOCK_REFRESH_MS = 1000;
 constexpr uint32_t DISPLAY_SLEEP_IDLE_MS = 300000;
+constexpr uint32_t DISPLAY_SLEEP_BATTERY_CAP_MS = 120000;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 45;
 constexpr uint32_t BUTTON_SHORT_MIN_MS = 35;
 constexpr uint32_t BUTTON_LONG_MS = 1200;
 constexpr uint32_t BUTTON_STARTUP_SETTLE_MS = 2500;
-constexpr uint32_t BATTERY_REFRESH_MS = 60000;
+constexpr uint32_t TOUCH_DOUBLE_TAP_MS = 450;
+constexpr uint32_t BATTERY_REFRESH_MS = 30000;
+constexpr float BATTERY_EXTERNAL_HIGH_V = 4.12f;
+constexpr float BATTERY_EXTERNAL_RISE_V = 0.050f;
+constexpr int16_t BATTERY_EXTERNAL_FAST_RISE_MV = 80;
+constexpr int16_t BATTERY_EXTERNAL_DROP_MV = -80;
 constexpr uint32_t BLE_SCAN_RETRY_MS = 15000;
 constexpr uint32_t BLE_POLL_ANALOG_MS = 5000;
 constexpr uint32_t BLE_POLL_ANALOG_IDLE_MS = 60000;
@@ -43,6 +52,9 @@ constexpr uint32_t BLE_POLL_WARNING_MS = 30000;
 constexpr uint32_t BLE_POLL_CELLS_MS = 15000;
 constexpr uint32_t BMS_STALE_MS = 120000;
 constexpr uint32_t RUNTIME_SAVE_MS = 60000;
+constexpr const char *DEFAULT_SUBTITLE = "Fresh electrons, suspiciously organized.";
+constexpr const char *DEFAULT_TZ = "PST8PDT,M3.2.0/2,M11.1.0/2";
+constexpr const char *DEFAULT_NTP_SERVER = "pool.ntp.org";
 
 constexpr const char *BMS_BLE_SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb";
 constexpr const char *BMS_BLE_NOTIFY_UUID = "0000fff1-0000-1000-8000-00805f9b34fb";
@@ -59,6 +71,8 @@ constexpr uint16_t DP_WARNING_INFO = 141;
 constexpr uint16_t DP_PRODUCT_INFO = 146;
 constexpr uint8_t JBD_CMD_BASIC_INFO = 0x03;
 constexpr uint8_t JBD_CMD_CELL_VOLTAGES = 0x04;
+constexpr uint8_t JK_CMD_CELL_INFO   = 0x96;
+constexpr uint8_t JK_CMD_DEVICE_INFO = 0x97;
 
 constexpr float DEFAULT_TYPICAL_MOW_AMPS = 35.0f;
 constexpr float LOAD_FULL_SCALE_AMPS = 180.0f;
@@ -99,6 +113,8 @@ struct UsageCategory {
 enum class BmsParser : uint8_t {
   Watt,
   Jbd,
+  Jk,
+  Daly,
 };
 
 struct BmsProfile {
@@ -122,17 +138,23 @@ constexpr BmsProfile BMS_PROFILES[] = {
     {"jbd_xiaoxiang_ffe0", "JBD / Xiaoxiang BLE UART (FFE0/FFE1)",
      JBD_FFE0_SERVICE_UUID, JBD_FFE1_DATA_UUID, JBD_FFE1_DATA_UUID, nullptr, nullptr, false,
      BmsParser::Jbd},
+    {"jk_bms_ble", "JK BMS (Jikong) BLE",
+     JBD_FFE0_SERVICE_UUID, JBD_FFE1_DATA_UUID, JBD_FFE1_DATA_UUID, nullptr, nullptr, false,
+     BmsParser::Jk},
+    {"daly_bms_ble", "Daly Smart BMS BLE",
+     BMS_BLE_SERVICE_UUID, BMS_BLE_NOTIFY_UUID, BMS_BLE_WRITE_UUID, nullptr, nullptr, false,
+     BmsParser::Daly},
 };
 
 constexpr ThemeProfile THEME_PROFILES[] = {
     {"chlorophyll_shift", "Chlorophyll Shift", "green",
-     "Deep green utility look for mower and off-grid battery dashboards.",
-     0x050605, 0x10170D, 0x17220F, 0x2A3524,
-     0xF6FAF0, 0x9CAA92, 0xB7F23B, 0x4F7B13, 0x40E0D0, 0xFFD166, 0xFF4D4D, 0x071007},
+     "Vibrant Ryobi-style lime green with high contrast battery telemetry.",
+     0x020700, 0x071306, 0x10220A, 0x4F7F19,
+     0xFAFFF2, 0xC4ECA7, 0xCCFF00, 0x6FDB00, 0x00F060, 0xFFE500, 0xFF3355, 0x081000},
     {"redline_charge", "Redline Charge", "red",
-     "High-contrast red scheme for carts, utility haulers, and performance builds.",
-     0x090606, 0x171010, 0x231313, 0x3A2424,
-     0xFFF7F2, 0xC7A39C, 0xFF4D4D, 0x9F2020, 0xFFD166, 0xFFB703, 0x7DE2D1, 0x160404},
+     "Bright red scheme for carts, utility haulers, and performance builds.",
+     0x090103, 0x1C0509, 0x330912, 0x7A1B25,
+     0xFFF4F4, 0xFFC0C7, 0xFF1744, 0xFF5A00, 0xFFE600, 0x00F5D4, 0xFF00A8, 0x180004},
     {"violet_voltage", "Violet Voltage", "purple",
      "Purple and cyan palette for custom packs and show builds.",
      0x07060B, 0x12101B, 0x1F1730, 0x352B4B,
@@ -145,10 +167,10 @@ constexpr ThemeProfile THEME_PROFILES[] = {
      "Warm orange scheme for trailers, RVs, and shop power systems.",
      0x0A0704, 0x181109, 0x26180A, 0x3E2B17,
      0xFFF9F0, 0xC8AA84, 0xFF9F1C, 0xB85C00, 0x2EC4B6, 0xFFE066, 0xE71D36, 0x1B0900},
-    {"parade_current", "Parade Current", "multicolored",
-     "Loud, bright, flamboyant, and proud for installs that should not blend in.",
-     0x07030C, 0x170C28, 0x241044, 0x5F2BFF,
-     0xFFFFFF, 0xFFD6FF, 0xF72585, 0xB5179E, 0x00F5D4, 0xFEE440, 0xFF006E, 0x120016},
+    {"fabulous", "Fabulous!", "neon",
+     "Vegas strip neon palette — hot pink, electric cyan, neon yellow on deep purple-black.",
+     0x0A0012, 0x14001E, 0x1E0030, 0x5C0070,
+     0xFFFFFF, 0xFFB8FF, 0xFF0090, 0xCC006C, 0x00F0FF, 0xFFEE00, 0xFF3300, 0x0A0012},
     {"pixel_fairway", "Pixel Fairway", "retro",
      "Retro display style for older carts, restored equipment, and DIY cabinets.",
      0x080A06, 0x15180D, 0x222510, 0x4D5830,
@@ -167,7 +189,7 @@ constexpr UsageCategory USAGE_CATEGORIES[] = {
     {"marine_trolling", "Marine / Trolling", "blue_fairway", "run", "trolling load", "running", "trolling", "standby", false},
     {"utility_cart", "Utility Cart", "redline_charge", "drive", "work load", "driving", "hauling", "parked", false},
     {"off_grid", "Off-Grid / Solar", "pixel_fairway", "load", "inverter load", "supplying loads", "inverter load", "standby", false},
-    {"custom", "Custom Large Pack", "parade_current", "activity", "high load", "active", "high load", "standby", false},
+    {"custom", "Custom Large Pack", "fabulous", "activity", "high load", "active", "high load", "standby", false},
 };
 
 struct AppSettings {
@@ -179,6 +201,7 @@ struct AppSettings {
   String bmsName;
   String bmsProtocol = "humsienk_watt";
   String mowerModel = "48V battery system";
+  String subtitle = DEFAULT_SUBTITLE;
   String usageCategory = "mower";
   String themeId = "chlorophyll_shift";
   bool dischargeCurrentNegative = true;
@@ -188,13 +211,34 @@ struct AppSettings {
   float typicalMowAmps = DEFAULT_TYPICAL_MOW_AMPS;
   float mowerRunAmps = DEFAULT_MOWER_ON_AMPS;
   float bladesOnAmps = DEFAULT_BLADES_ON_AMPS;
+  float chargeMinAmps = 0.5f;
   float nominalPackAh = 100.0f;
   String tempUnit = "F";
-  String timezone = "PST8PDT,M3.2.0,M11.1.0";
+  String timezone = DEFAULT_TZ;
   uint8_t brightness = 210;
   uint16_t displayRotation = 0;
+  uint16_t lcdTimeoutSec = 300;
+  bool powerSaveEnabled = false;
+  float idleBleWakeHours = 6.0f;
+  float lowVoltageFloorV = 3.0f;
+  // MQTT
+  bool mqttEnabled = false;
+  String mqttHost;
+  uint16_t mqttPort = 1883;
+  String mqttUser;
+  String mqttPassword;
+  String mqttTopicPrefix;
   bool featureMic = false;
   float micRunThreshold = 900.0f;
+  float hoursBaseline = 0.0f;
+  // User-defined state labels (populated from category defaults on first use)
+  String labelCharging;
+  String labelStandby;
+  String labelActive;
+  String labelWorking;
+  // NTP settings — opt-in only; no WAN requests unless explicitly enabled
+  bool ntpEnabled = true;
+  String ntpServer = DEFAULT_NTP_SERVER;
 };
 
 struct BatterySample {
@@ -207,6 +251,21 @@ struct BatterySample {
   bool present = false;
   bool usbCdcConnected = false;
   uint32_t updatedMs = 0;
+};
+
+enum class PowerSource : uint8_t {
+  External,
+  Battery,
+  Unknown,
+};
+
+enum class BlePolicyMode : uint8_t {
+  Full,
+  Charging,
+  Idle,
+  ActiveSlow,
+  ActiveMedium,
+  ActiveFast,
 };
 
 struct BmsBleData {
@@ -258,6 +317,7 @@ struct BmsBleData {
   float minCellV = 0.0f;
   float maxCellV = 0.0f;
   float deltaCellMv = 0.0f;
+  uint8_t balanceState = 0;
 };
 
 struct TouchPoint {
@@ -292,8 +352,21 @@ Arduino_DataBus *displayBus = new Arduino_ESP32QSPI(
 Arduino_GFX *gfx = new Arduino_ST77916(
     displayBus, GFX_NOT_DEFINED, 0, true, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
+struct DegradationData {
+  float maxCellSpreadMv = 0.0f;
+  float minCellVoltageV = 9.9f;
+  float maxTempC = -99.0f;
+  uint32_t lowVoltageEvents = 0;
+  uint32_t highCurrentEvents = 0;
+} degradation;
+
 AppSettings settings;
+MqttClient mqttClient;
 BatterySample screenBattery;
+float screenBatteryBootVolts = 0.0f;
+float screenBatteryLowVolts = 0.0f;
+uint8_t screenBatteryRiseSamples = 0;
+bool screenBatteryExternalLatched = false;
 BmsBleData bms;
 
 String internalI2cAddresses;
@@ -312,15 +385,28 @@ uint8_t ioExpanderOutput = 0x07;
 uint8_t displayPage = 0;
 uint32_t lastWifiAttemptMs = 0;
 uint32_t lastDisplayMs = 0;
+uint32_t lastWebRequestMs = 0;
 uint32_t lastBatteryMs = 0;
 uint32_t lastTouchProbeMs = 0;
 uint32_t lastTouchMs = 0;
+uint32_t lastSleepTapMs = 0;
 uint32_t lastDisplayActivityMs = 0;
-uint64_t runtimeSeconds = 0;
-uint64_t rideSessionSeconds = 0;
-uint32_t runTimeRemainderMs = 0;
-uint32_t lastRuntimeTickMs = 0;
-uint32_t lastRuntimeSaveMs = 0;
+PowerSource powerSource = PowerSource::Unknown;
+BlePolicyMode blePolicyMode = BlePolicyMode::Full;
+float socRatePctPerHour = 0.0f;
+uint8_t lastSocForRate = 0;
+uint32_t lastSocRateMs = 0;
+uint32_t observedAnalogMs = 0;
+uint32_t lastBmsCacheSaveMs = 0;
+uint32_t cachedAnalogSourceMs = 0;
+bool bmsCacheLoaded = false;
+float hoursTotal = 0.0f;
+float hoursStandby = 0.0f;
+float hoursActive = 0.0f;
+float hoursWorking = 0.0f;
+float sessionActiveHours = 0.0f;
+uint32_t lastHoursTickMs = 0;
+uint32_t lastHoursSaveMs = 0;
 bool previousCharging = false;
 String lastButtonAction;
 uint32_t lastButtonActionMs = 0;
@@ -331,7 +417,10 @@ String escapeHtml(const String &input);
 void drawDisplay(bool fullRedraw = false);
 void setupRoutes();
 void saveSettings();
-void saveRuntime();
+void saveHours();
+void loadBmsCache();
+void saveBmsCache();
+void sendJson(JsonDocument &doc);
 void startStaOnly();
 void startProvisioningAp();
 void configureClock();
@@ -476,11 +565,78 @@ String cssColor(uint32_t value) {
   return String(buffer);
 }
 
+String displayTitle() {
+  String title = settings.hostname;
+  title.replace('_', ' ');
+  title.replace('-', ' ');
+  title.trim();
+  return title.length() ? title : String(PROJECT_NAME);
+}
+
+const char *powerSourceName(PowerSource source) {
+  switch (source) {
+    case PowerSource::External: return "external";
+    case PowerSource::Battery: return "internal_battery";
+    default: return "unknown";
+  }
+}
+
+const char *blePolicyName(BlePolicyMode mode) {
+  switch (mode) {
+    case BlePolicyMode::Charging: return "charging";
+    case BlePolicyMode::Idle: return "idle_sleep";
+    case BlePolicyMode::ActiveSlow: return "active_slow";
+    case BlePolicyMode::ActiveMedium: return "active_medium";
+    case BlePolicyMode::ActiveFast: return "active_fast";
+    default: return "full";
+  }
+}
+
+bool batteryPowerSaveActive() {
+  return settings.powerSaveEnabled;
+}
+
+uint32_t displaySleepTimeoutMs() {
+  if (!batteryPowerSaveActive()) return 0;
+  uint32_t timeout = static_cast<uint32_t>(settings.lcdTimeoutSec) * 1000UL;
+  if (timeout == 0 || timeout > DISPLAY_SLEEP_BATTERY_CAP_MS) return DISPLAY_SLEEP_BATTERY_CAP_MS;
+  return timeout;
+}
+
+void updateSocRate() {
+  if (bms.lastAnalogMs == 0 || bms.lastAnalogMs == observedAnalogMs) return;
+  observedAnalogMs = bms.lastAnalogMs;
+  if (bms.connected) bmsCacheLoaded = false;
+  const uint32_t now = millis();
+  if (lastSocRateMs > 0 && now > lastSocRateMs) {
+    const float elapsedH = (now - lastSocRateMs) / 3600000.0f;
+    if (elapsedH > 0.001f) {
+      socRatePctPerHour = (static_cast<float>(lastSocForRate) - static_cast<float>(bms.soc)) / elapsedH;
+      if (socRatePctPerHour < 0.0f) socRatePctPerHour = 0.0f;
+    }
+  }
+  lastSocForRate = bms.soc;
+  lastSocRateMs = now;
+}
+
 bool deviceAdvertisesProfile(const NimBLEAdvertisedDevice *device, const BmsProfile &profile) {
   return device && device->isAdvertisingService(NimBLEUUID(profile.serviceUuid));
 }
 
 const BmsProfile *firstCompatibleProfile(const NimBLEAdvertisedDevice *device) {
+  if (!device) return nullptr;
+  const String name(device->getName().c_str());
+  // Name-pattern hints override UUID-order for devices that share service UUIDs
+  if (name.startsWith("HS") || name.startsWith("Humsienk") || name.startsWith("humsienk")) {
+    for (const auto &p : BMS_PROFILES) {
+      if (String(p.id) == "humsienk_watt" && deviceAdvertisesProfile(device, p)) return &p;
+    }
+  }
+  if (name.startsWith("JK") || name.startsWith("jk-") || name.startsWith("JK-")) {
+    for (const auto &p : BMS_PROFILES) {
+      if (String(p.id) == "jk_bms_ble" && deviceAdvertisesProfile(device, p)) return &p;
+    }
+  }
   for (const auto &profile : BMS_PROFILES) {
     if (deviceAdvertisesProfile(device, profile)) return &profile;
   }
@@ -559,7 +715,52 @@ float bmsHealthPercent() {
 }
 
 bool packCharging() {
-  return chargeCurrentA() >= 0.2f;
+  return chargeCurrentA() >= settings.chargeMinAmps;
+}
+
+enum class ActivityState : uint8_t { Charging, Standby, Active, Working };
+
+enum class MaintType : uint8_t { HoursTotal = 0, HoursActive = 1, HoursWorking = 2, Days = 3 };
+
+struct MaintenanceItem {
+  uint8_t  id = 0;
+  String   name;
+  MaintType type = MaintType::HoursActive;
+  float    interval = 100.0f;
+  uint32_t lastResetTs = 0;
+  float    lastResetVal = 0.0f;
+  String   notes;
+};
+
+std::vector<MaintenanceItem> maintenanceItems;
+
+// Forward declarations — activityDetected/workDetected defined below
+bool activityDetected();
+bool workDetected();
+
+ActivityState activityState() {
+  if (packCharging()) return ActivityState::Charging;
+  if (workDetected()) return ActivityState::Working;
+  if (activityDetected()) return ActivityState::Active;
+  return ActivityState::Standby;
+}
+
+const String &stateLabel(ActivityState state) {
+  switch (state) {
+    case ActivityState::Charging: return settings.labelCharging;
+    case ActivityState::Active:   return settings.labelActive;
+    case ActivityState::Working:  return settings.labelWorking;
+    default:                      return settings.labelStandby;
+  }
+}
+
+const char *activityStateKey(ActivityState state) {
+  switch (state) {
+    case ActivityState::Charging: return "charging";
+    case ActivityState::Active:   return "active";
+    case ActivityState::Working:  return "working";
+    default:                      return "standby";
+  }
 }
 
 bool activityDetected() {
@@ -584,27 +785,33 @@ bool bladesLikelyOn() {
 }
 
 String mowerModeLabel() {
-  if (packCharging()) return "charging";
-  const UsageCategory &usage = activeUsage();
-  if (!settings.activityDetection) return dischargeCurrentA() >= 0.2f ? "discharging" : usage.standbyMode;
-  if (workDetected()) return usage.workMode;
-  if (activityDetected()) return usage.activeMode;
-  return usage.standbyMode;
+  return stateLabel(activityState());
 }
 
 const char *displayPageName(uint8_t page) {
   switch (page % R48DisplayUi::PAGE_COUNT) {
     case 0: return "dashboard";
-    case 1: return "power";
+    case 1: return "battery";
     case 2: return "clock";
     default: return "status";
   }
 }
 
+String formatCountdown(uint32_t ms) {
+  const uint32_t s = ms / 1000;
+  const uint32_t h = s / 3600;
+  const uint32_t m = (s % 3600) / 60;
+  if (h > 0) return "in " + String(h) + "h " + String(m) + "m";
+  if (m > 0) return "in " + String(m) + "m";
+  return "soon";
+}
+
 String bmsLinkLabel() {
+  if (bms.status.startsWith("BLE sleeping")) return "sleeping";
   if (bms.connected && bms.lastAnalogMs > 0 && millis() - bms.lastAnalogMs > BMS_STALE_MS) return "stale";
   if (bms.connected && bms.authenticated && bms.lastAnalogMs > 0) return "online";
   if (bms.connected) return "connected";
+  if (!bms.connected && bms.lastAnalogMs > 0 && millis() - bms.lastAnalogMs <= BMS_STALE_MS) return "cached";
   if (bms.scanning) return "scanning";
   return "searching";
 }
@@ -613,6 +820,14 @@ class BleBmsClient;
 BleBmsClient *bleClientForNotify = nullptr;
 
 class BleBmsClient {
+  struct PollPolicy {
+    BlePolicyMode mode = BlePolicyMode::Full;
+    uint32_t analogMs = BLE_POLL_ANALOG_MS;
+    uint32_t cellMs = BLE_POLL_CELLS_MS;
+    uint32_t warningMs = BLE_POLL_WARNING_MS;
+    bool keepConnected = true;
+  };
+
  public:
   void begin() {
     if (bms.initialized) return;
@@ -638,7 +853,15 @@ class BleBmsClient {
       bms.status = "disconnected, rescanning";
       bms.lastError = "BLE connection dropped";
     }
+    const PollPolicy policy = currentPolicy();
+    blePolicyMode = policy.mode;
     if (!bms.connected) {
+      if (bms.lastAnalogPollMs > 0 && now - bms.lastAnalogPollMs < policy.analogMs) {
+        const uint32_t elapsed = now - bms.lastAnalogPollMs;
+        const uint32_t remaining = elapsed < policy.analogMs ? policy.analogMs - elapsed : 0;
+        bms.status = String("BLE sleeping — next check ") + formatCountdown(remaining);
+        return;
+      }
       if (now - bms.lastScanMs >= BLE_SCAN_RETRY_MS || bms.lastScanMs == 0) scanAndConnect();
       return;
     }
@@ -651,25 +874,34 @@ class BleBmsClient {
       bms.status = "stale data";
       bms.lastError = "BMS data stale";
     }
-    const uint32_t analogInterval = displaySleeping ? BLE_POLL_ANALOG_IDLE_MS : BLE_POLL_ANALOG_MS;
+    if (!policy.keepConnected && bms.lastAnalogPollMs > 0 && now - bms.lastAnalogPollMs > 3000UL) {
+      resetClient(true);
+      const uint32_t elapsed = now - bms.lastAnalogPollMs;
+      const uint32_t remaining = elapsed < policy.analogMs ? policy.analogMs - elapsed : 0;
+      bms.status = String("BLE sleeping — next check ") + formatCountdown(remaining);
+      return;
+    }
+    const uint32_t analogInterval = policy.analogMs;
     if (bms.lastAnalogMs == 0 || now - bms.lastAnalogPollMs >= analogInterval || bms.lastAnalogPollMs == 0) {
       requestAnalog();
       bms.lastAnalogPollMs = now;
       return;
     }
     if (activeProfile().parser == BmsParser::Jbd &&
-        (bms.cellCount == 0 || now - bms.lastCellPollMs >= BLE_POLL_CELLS_MS || bms.lastCellPollMs == 0)) {
+        (bms.cellCount == 0 || now - bms.lastCellPollMs >= policy.cellMs || bms.lastCellPollMs == 0)) {
       requestCells();
       bms.lastCellPollMs = now;
       return;
     }
-    if (activeProfile().parser == BmsParser::Watt && (bms.lastProductMs == 0 || now - bms.lastProductPollMs > 60000)) {
+    const BmsParser parser = activeProfile().parser;
+    if ((parser == BmsParser::Watt || parser == BmsParser::Jk) &&
+        (bms.lastProductMs == 0 || now - bms.lastProductPollMs > 60000)) {
       requestProduct();
       bms.lastProductPollMs = now;
       return;
     }
-    if (activeProfile().parser == BmsParser::Watt &&
-        (now - bms.lastWarningPollMs >= BLE_POLL_WARNING_MS || bms.lastWarningPollMs == 0)) {
+    if (parser == BmsParser::Watt &&
+        (now - bms.lastWarningPollMs >= policy.warningMs || bms.lastWarningPollMs == 0)) {
       requestWarning();
       bms.lastWarningPollMs = now;
     }
@@ -711,6 +943,52 @@ class BleBmsClient {
 
  private:
   static constexpr size_t NOTIFY_QUEUE_SIZE = 1024;
+
+  PollPolicy currentPolicy() const {
+    PollPolicy policy;
+    if (!batteryPowerSaveActive()) return policy;
+
+    if (packCharging()) {
+      policy.mode = BlePolicyMode::Charging;
+      policy.analogMs = 30000UL;
+      policy.cellMs = 60000UL;
+      policy.warningMs = 60000UL;
+      return policy;
+    }
+
+    if (bms.soc >= 98 && dischargeCurrentA() < 0.3f) {
+      policy.mode = BlePolicyMode::Idle;
+      policy.analogMs = static_cast<uint32_t>(settings.idleBleWakeHours * 3600000.0f);
+      policy.cellMs = policy.analogMs;
+      policy.warningMs = policy.analogMs;
+      policy.keepConnected = false;
+      return policy;
+    }
+
+    if (workDetected() || socRatePctPerHour > 5.0f || dischargeCurrentA() >= settings.bladesOnAmps) {
+      policy.mode = BlePolicyMode::ActiveFast;
+      policy.analogMs = 60000UL;
+      policy.cellMs = 120000UL;
+      policy.warningMs = 120000UL;
+      return policy;
+    }
+
+    if (activityDetected() || socRatePctPerHour > 2.0f) {
+      policy.mode = BlePolicyMode::ActiveMedium;
+      policy.analogMs = 180000UL;
+      policy.cellMs = 360000UL;
+      policy.warningMs = 360000UL;
+      policy.keepConnected = false;
+      return policy;
+    }
+
+    policy.mode = BlePolicyMode::ActiveSlow;
+    policy.analogMs = 600000UL;
+    policy.cellMs = 1200000UL;
+    policy.warningMs = 1200000UL;
+    policy.keepConnected = false;
+    return policy;
+  }
 
   bool ready() const {
     return client_ && client_->isConnected() && writeChar_ && notifyChar_ && bms.authenticated;
@@ -876,7 +1154,9 @@ class BleBmsClient {
 
   bool requestAnalog() {
     const BmsProfile &profile = activeProfile();
-    if (profile.parser == BmsParser::Jbd) return requestJbdRead(JBD_CMD_BASIC_INFO);
+    if (profile.parser == BmsParser::Jbd)  return requestJbdRead(JBD_CMD_BASIC_INFO);
+    if (profile.parser == BmsParser::Jk)   return requestJkRead(JK_CMD_CELL_INFO);
+    if (profile.parser == BmsParser::Daly) return requestDalyStatus();
     return requestWattRead(DP_ANALOG_QUANTITY);
   }
 
@@ -888,8 +1168,9 @@ class BleBmsClient {
 
   bool requestProduct() {
     const BmsProfile &profile = activeProfile();
-    if (profile.parser != BmsParser::Watt) return true;
-    return requestWattRead(DP_PRODUCT_INFO);
+    if (profile.parser == BmsParser::Watt) return requestWattRead(DP_PRODUCT_INFO);
+    if (profile.parser == BmsParser::Jk)   return requestJkRead(JK_CMD_DEVICE_INFO);
+    return true;
   }
 
   bool requestWarning() {
@@ -929,16 +1210,53 @@ class BleBmsClient {
     return ok;
   }
 
+  bool requestJkRead(uint8_t command) {
+    if (!ready()) return false;
+    uint8_t frame[20]{0xAA, 0x55, 0x90, 0xEB, command, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    uint8_t crc = 0;
+    for (size_t i = 0; i < 19; ++i) crc += frame[i];
+    frame[19] = crc;
+    const bool ok = writeChar_->writeValue(frame, sizeof(frame), activeProfile().writeWithResponse);
+    bms.lastPollMs = millis();
+    if (!ok) { bms.errors++; bms.lastError = "BLE write failed"; }
+    return ok;
+  }
+
+  bool requestDalyStatus() {
+    if (!ready()) return false;
+    // Read 80 registers from 0x0000 — covers cells (max 32), temps, voltage, SOC, etc.
+    uint8_t frame[8]{0xD2, 0x03, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00};
+    const uint16_t crc = crc16Modbus(frame, 6);
+    frame[6] = static_cast<uint8_t>(crc & 0xFF);
+    frame[7] = static_cast<uint8_t>(crc >> 8);
+    const bool ok = writeChar_->writeValue(frame, sizeof(frame), activeProfile().writeWithResponse);
+    bms.lastPollMs = millis();
+    if (!ok) { bms.errors++; bms.lastError = "BLE write failed"; }
+    return ok;
+  }
+
   void consumeRxBuffer() {
+    const BmsParser parser = activeProfile().parser;
     while (rxLen_ > 0) {
-      const uint8_t expectedHead = activeProfile().parser == BmsParser::Jbd ? 0xDD : 0x7E;
-      if (rxBuffer_[0] != expectedHead) {
+      bool synced = false;
+      if      (parser == BmsParser::Jbd  && rxBuffer_[0] == 0xDD) synced = true;
+      else if (parser == BmsParser::Watt && rxBuffer_[0] == 0x7E) synced = true;
+      else if (parser == BmsParser::Daly && rxBuffer_[0] == 0xD2) synced = true;
+      else if (parser == BmsParser::Jk   && rxLen_ >= 4 &&
+               rxBuffer_[0] == 0x55 && rxBuffer_[1] == 0xAA &&
+               rxBuffer_[2] == 0xEB && rxBuffer_[3] == 0x90) synced = true;
+      if (!synced) {
         memmove(rxBuffer_, rxBuffer_ + 1, rxLen_ - 1);
         rxLen_--;
         bms.errors++;
         continue;
       }
-      const size_t expected = activeProfile().parser == BmsParser::Jbd ? expectedJbdLength() : expectedWattLength();
+      size_t expected = 0;
+      if      (parser == BmsParser::Jbd)  expected = expectedJbdLength();
+      else if (parser == BmsParser::Watt) expected = expectedWattLength();
+      else if (parser == BmsParser::Daly) expected = expectedDalyLength();
+      else if (parser == BmsParser::Jk)   expected = expectedJkLength();
       if (expected == 0) return;
       if (expected > sizeof(rxBuffer_)) {
         rxLen_ = 0;
@@ -965,12 +1283,29 @@ class BleBmsClient {
     return static_cast<size_t>(dataLen) + 7;
   }
 
+  size_t expectedDalyLength() const {
+    if (rxLen_ < 3 || rxBuffer_[0] != 0xD2 || rxBuffer_[1] != 0x03) return 0;
+    const uint8_t dataLen = rxBuffer_[2];
+    if (dataLen < 10) return 0;
+    return static_cast<size_t>(dataLen) + 5;  // D2 03 len [data] crc_lo crc_hi
+  }
+
+  size_t expectedJkLength() const {
+    // JK CELL_INFO = 300 bytes, DEVICE_INFO = 48 bytes (both fixed per command)
+    if (rxLen_ < 5) return 0;
+    const uint8_t cmd = rxBuffer_[4];
+    if (cmd == JK_CMD_CELL_INFO)   return 300;
+    if (cmd == JK_CMD_DEVICE_INFO) return 48;
+    return 0;
+  }
+
   void parseFrame(const uint8_t *frame, size_t len) {
-    if (activeProfile().parser == BmsParser::Jbd) {
-      parseJbdFrame(frame, len);
-      return;
+    switch (activeProfile().parser) {
+      case BmsParser::Jbd:  parseJbdFrame(frame, len);  return;
+      case BmsParser::Jk:   parseJkFrame(frame, len);   return;
+      case BmsParser::Daly: parseDalyFrame(frame, len); return;
+      default:              parseWattFrame(frame, len);  return;
     }
-    parseWattFrame(frame, len);
   }
 
   void parseWattFrame(const uint8_t *frame, size_t len) {
@@ -980,9 +1315,13 @@ class BleBmsClient {
       bms.lastError = "invalid BLE frame";
       return;
     }
-    const uint16_t gotCrc = readU16(frame + len - 3);
-    const uint16_t wantCrc = crc16Modbus(frame, len - 3);
-    if (gotCrc != wantCrc) {
+    const uint16_t gotCrcBe = readU16(frame + len - 3);
+    const uint16_t gotCrcLe = readU16LE(frame + len - 3);
+    // Try CRC over full frame and over frame[1..] (some BMS implementations exclude the 7E start byte)
+    const uint16_t wantCrc1 = crc16Modbus(frame, len - 3);
+    const uint16_t wantCrc2 = len >= 4 ? crc16Modbus(frame + 1, len - 4) : 0;
+    if (gotCrcBe != wantCrc1 && gotCrcLe != wantCrc1 &&
+        gotCrcBe != wantCrc2 && gotCrcLe != wantCrc2) {
       bms.errors++;
       bms.lastError = "BLE CRC mismatch";
       return;
@@ -1138,6 +1477,145 @@ class BleBmsClient {
     bms.lastAnalogMs = millis();
   }
 
+  // ── JK BMS (Jikong) ──────────────────────────────────────────────────────
+  // Protocol: FFE0/FFE1, 20-byte request AA 55 90 EB [cmd] 00..CRC
+  // Response: 55 AA EB 90 [cmd] [seq] [payload…] [crc_sum]
+  // Offsets below are absolute from frame[0]=0x55.
+  // CELL_INFO (0x96): 300 bytes total. DEVICE_INFO (0x97): 48 bytes total.
+
+  void parseJkFrame(const uint8_t *frame, size_t len) {
+    if (len < 6 || frame[0] != 0x55 || frame[1] != 0xAA || frame[2] != 0xEB || frame[3] != 0x90) {
+      bms.errors++; bms.lastError = "invalid JK frame"; return;
+    }
+    uint8_t crc = 0;
+    for (size_t i = 0; i < len - 1; ++i) crc += frame[i];
+    if (crc != frame[len - 1]) {
+      bms.errors++; bms.lastError = "JK CRC mismatch"; return;
+    }
+    bms.lastError = "";
+    bms.frames++;
+    bms.latestFrameHex = bytesToHex(frame, len, 96);
+    bms.status = "data received";
+    const uint8_t cmd = frame[4];
+    if      (cmd == JK_CMD_CELL_INFO)   parseJkCellInfo(frame, len);
+    else if (cmd == JK_CMD_DEVICE_INFO) parseJkDeviceInfo(frame, len);
+  }
+
+  void parseJkCellInfo(const uint8_t *frame, size_t len) {
+    // Cell voltages: frame[6..53] = 24 × uint16 LE × 0.001 V
+    if (len < 56) return;
+    bms.minCellV = 0.0f;
+    bms.maxCellV = 0.0f;
+    uint8_t cells = 0;
+    for (uint8_t i = 0; i < 24; ++i) {
+      const float v = readU16LE(frame + 6 + i * 2) * 0.001f;
+      if (v > 0.5f) cells = i + 1;
+    }
+    bms.cellCount = cells;
+    for (uint8_t i = 0; i < cells; ++i) {
+      const float v = readU16LE(frame + 6 + i * 2) * 0.001f;
+      bms.cellVolts[i] = v;
+      if (i == 0 || v < bms.minCellV) bms.minCellV = v;
+      if (i == 0 || v > bms.maxCellV) bms.maxCellV = v;
+    }
+    bms.deltaCellMv = (bms.maxCellV - bms.minCellV) * 1000.0f;
+    if (len < 155) { bms.lastAnalogMs = millis(); return; }
+    // frame[118..121]: total pack voltage, uint32 LE, ×0.001 V
+    bms.packVoltage  = readU32LE(frame + 118) * 0.001f;
+    // frame[126..129]: current, int32 LE, ×0.001 A (sign: positive=charge on most JK FW)
+    bms.currentA     = static_cast<float>(static_cast<int32_t>(readU32LE(frame + 126))) * 0.001f;
+    // frame[130..131]: probe T1 (×0.1 °C), frame[132..133]: probe T2, frame[134..135]: MOS
+    bms.pcbTempC     = static_cast<float>(static_cast<int16_t>(readU16LE(frame + 130))) * 0.1f;
+    bms.mosTempC     = static_cast<float>(static_cast<int16_t>(readU16LE(frame + 134))) * 0.1f;
+    bms.tempsC[0]    = static_cast<float>(static_cast<int16_t>(readU16LE(frame + 132))) * 0.1f;
+    bms.tempCount    = 1;
+    // frame[140]: balance state, frame[141]: SOC %, frame[142..145]: remaining Ah, frame[146..149]: full Ah
+    bms.balanceState = frame[140];
+    bms.soc          = frame[141];
+    bms.remainingAh  = readU32LE(frame + 142) * 0.001f;
+    bms.totalAh      = readU32LE(frame + 146) * 0.001f;
+    bms.designAh     = bms.totalAh;
+    // frame[150..153]: cycle count
+    if (len > 154) bms.cycleCount = static_cast<uint16_t>(readU32LE(frame + 150));
+    bms.lastAnalogMs = millis();
+  }
+
+  void parseJkDeviceInfo(const uint8_t *frame, size_t len) {
+    if (len < 48) return;
+    bms.software     = paddedAscii(frame, 6, 16);
+    bms.manufacturer = paddedAscii(frame, 22, 16);
+    bms.serial       = paddedAscii(frame, 38, 10);
+    bms.lastProductMs = millis();
+  }
+
+  // ── Daly Smart BMS ───────────────────────────────────────────────────────
+  // Protocol: FFF0/FFF1/FFF2 (no auth), D2 Modbus-style
+  // Request:  D2 03 [addr_hi] [addr_lo] [cnt_hi] [cnt_lo] [crc_lo] [crc_hi]
+  // Response: D2 03 [len] [data...] [crc_lo] [crc_hi]
+  // All offsets below are absolute from frame[0]=0xD2.
+
+  void parseDalyFrame(const uint8_t *frame, size_t len) {
+    if (len < 5 || frame[0] != 0xD2 || frame[1] != 0x03) {
+      bms.errors++; bms.lastError = "invalid Daly frame"; return;
+    }
+    const uint8_t dataLen = frame[2];
+    if (static_cast<size_t>(dataLen) + 5 != len) {
+      bms.errors++; bms.lastError = "invalid Daly length"; return;
+    }
+    const uint16_t gotCrc  = static_cast<uint16_t>(frame[3 + dataLen]) |
+                             (static_cast<uint16_t>(frame[4 + dataLen]) << 8);
+    const uint16_t calcCrc = crc16Modbus(frame, 3 + dataLen);
+    if (gotCrc != calcCrc) {
+      bms.errors++; bms.lastError = "Daly CRC mismatch"; return;
+    }
+    bms.lastError = "";
+    bms.frames++;
+    bms.latestFrameHex = bytesToHex(frame, len, 96);
+    bms.status = "data received";
+    parseDalyStatus(frame, len);
+  }
+
+  void parseDalyStatus(const uint8_t *frame, size_t len) {
+    // Minimum for 62-register response: 129 bytes; for 80-register: 165 bytes
+    if (len < 69) return;
+    // Cell count at frame[102] (low byte of uint16 BE at 101-102)
+    const uint8_t cells = min(frame[102], static_cast<uint8_t>(32));
+    bms.cellCount = cells;
+    bms.minCellV  = 0.0f;
+    bms.maxCellV  = 0.0f;
+    // Cell voltages: frame[3 + i*2], BE, ×0.001 V
+    for (uint8_t i = 0; i < cells && (3 + i * 2 + 1) < len; ++i) {
+      const float v = readU16(frame + 3 + i * 2) * 0.001f;
+      bms.cellVolts[i] = v;
+      if (i == 0 || v < bms.minCellV) bms.minCellV = v;
+      if (i == 0 || v > bms.maxCellV) bms.maxCellV = v;
+    }
+    bms.deltaCellMv = (bms.maxCellV - bms.minCellV) * 1000.0f;
+    if (len < 90) { bms.lastAnalogMs = millis(); return; }
+    // Temperatures: frame[67 + i*2], BE, (raw-40)°C. Count at frame[104].
+    const uint8_t tempCount = min(frame[104], static_cast<uint8_t>(8));
+    bms.tempCount = tempCount;
+    for (uint8_t i = 0; i < tempCount && (67 + i * 2 + 1) < len; ++i) {
+      const float t = static_cast<float>(readU16(frame + 67 + i * 2)) - 40.0f;
+      if      (i == 0) bms.mosTempC = t;
+      else if (i == 1) bms.pcbTempC = t;
+      else             bms.tempsC[i - 2] = t;
+    }
+    // frame[83..84]: total voltage BE ×0.1V; frame[85..86]: current (raw-30000)×0.1A; frame[87..88]: SOC ×0.1%
+    bms.packVoltage = readU16(frame + 83) * 0.1f;
+    bms.currentA    = (static_cast<float>(readU16(frame + 85)) - 30000.0f) * 0.1f;
+    bms.soc         = static_cast<uint16_t>(readU16(frame + 87) / 10);
+    if (len < 110) { bms.lastAnalogMs = millis(); return; }
+    // frame[99..100]: remaining Ah ×0.1; frame[105..106]: cycles; frame[107..108]: balance on/off
+    bms.remainingAh  = readU16(frame + 99) * 0.1f;
+    bms.totalAh      = bms.remainingAh * 100.0f / max(1.0f, static_cast<float>(bms.soc));
+    bms.designAh     = bms.totalAh;
+    bms.cycleCount   = readU16(frame + 105);
+    bms.balanceState = readU16(frame + 107) != 0 ? 1 : 0;
+    if (len > 116) bms.deltaCellMv = readU16(frame + 115) * 1.0f;  // ×0.001V×1000 = mV
+    bms.lastAnalogMs = millis();
+  }
+
   static uint16_t crc16Modbus(const uint8_t *data, size_t len) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < len; ++i) {
@@ -1157,6 +1635,15 @@ class BleBmsClient {
 
   static uint16_t readU16(const uint8_t *data) {
     return (static_cast<uint16_t>(data[0]) << 8) | data[1];
+  }
+
+  static uint16_t readU16LE(const uint8_t *data) {
+    return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
+  }
+
+  static uint32_t readU32LE(const uint8_t *data) {
+    return static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+           (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
   }
 
   static float rawTempC(uint16_t raw) {
@@ -1209,7 +1696,7 @@ class BleBmsClient {
   NimBLERemoteCharacteristic *notifyChar_ = nullptr;
   NimBLERemoteCharacteristic *writeChar_ = nullptr;
   NimBLERemoteCharacteristic *authChar_ = nullptr;
-  uint8_t rxBuffer_[384]{};
+  uint8_t rxBuffer_[512]{};
   size_t rxLen_ = 0;
   uint32_t lastRssiMs_ = 0;
   portMUX_TYPE notifyMux_ = portMUX_INITIALIZER_UNLOCKED;
@@ -1222,6 +1709,451 @@ class BleBmsClient {
 
 BleBmsClient bleBms;
 
+// ── MQTT helpers ─────────────────────────────────────────────────────────────
+
+String mqttEffectivePrefix() {
+  return settings.mqttTopicPrefix.isEmpty()
+    ? String("r48display/") + settings.hostname
+    : settings.mqttTopicPrefix;
+}
+
+void setupMqtt() {
+  if (!settings.mqttEnabled || settings.mqttHost.isEmpty()) return;
+  mqttClient.begin(settings.mqttHost, settings.mqttPort,
+                   settings.mqttUser, settings.mqttPassword,
+                   mqttEffectivePrefix(),
+                   String("r48display-") + chipSuffix());
+}
+
+void publishMqttState(bool heartbeat = false) {
+  if (!mqttClient.connected()) return;
+  JsonDocument doc;
+  doc["soc"] = (int)bms.soc;
+  doc["voltage"] = serialized(String(bms.packVoltage, 2));
+  const float signedA = chargeCurrentA() - dischargeCurrentA();
+  doc["current"] = serialized(String(signedA, 2));
+  doc["power"] = static_cast<int>((chargeCurrentA() - dischargeCurrentA()) * bms.packVoltage);
+  doc["remaining_ah"] = serialized(String(bms.remainingAh * capacityScale(), 1));
+  doc["cycles"] = bms.cycleCount;
+  doc["cell_delta_mv"] = static_cast<int>(bms.deltaCellMv + 0.5f);
+  doc["mos_temp_c"] = serialized(String(bms.mosTempC, 1));
+  doc["health_pct"] = serialized(String(bmsHealthPercent(), 1));
+  const ActivityState as = activityState();
+  doc["status"] = activityStateKey(as);
+  doc["status_label"] = stateLabel(as);
+  doc["hours_total"] = serialized(String(settings.hoursBaseline + hoursTotal, 1));
+  doc["hours_active"] = serialized(String(hoursActive, 1));
+  doc["hours_working"] = serialized(String(hoursWorking, 1));
+  doc["link"] = heartbeat
+    ? String(bms.connected ? "stale" : "disconnected")
+    : bmsLinkLabel();
+  String payload; serializeJson(doc, payload);
+  mqttClient.publish("state", payload);
+}
+
+void publishMqttCells() {
+  if (!mqttClient.connected() || bms.cellCount == 0) return;
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (uint8_t i = 0; i < bms.cellCount && i < 32; i++)
+    arr.add(serialized(String(bms.cellVolts[i], 3)));
+  String payload; serializeJson(doc, payload);
+  mqttClient.publish("cells", payload);
+}
+
+void publishMqttDiscovery() {
+  if (!mqttClient.connected()) return;
+  const String chipId = chipSuffix();
+  const String devId = "r48display_" + chipId;
+  const String stateTopic = mqttClient.prefix() + "/state";
+  const String availTopic = mqttClient.prefix() + "/availability";
+  const String devName = String("R48Display (") + settings.hostname + ")";
+  const char *tempUnit = settings.tempUnit == "F" ? "°F" : "°C";
+
+  auto buildDev = [&](JsonDocument &d) {
+    JsonObject dev = d["device"].to<JsonObject>();
+    JsonArray ids = dev["identifiers"].to<JsonArray>();
+    ids.add(devId);
+    dev["name"] = devName;
+    dev["model"] = "R48Display";
+    dev["manufacturer"] = "R48Display";
+    dev["sw_version"] = FIRMWARE_VERSION;
+  };
+
+  auto sensor = [&](const char *eid, const char *name, const char *vTpl,
+                    const char *unit, const char *devClass, const char *icon) {
+    JsonDocument d;
+    d["name"] = name;
+    d["unique_id"] = devId + "_" + eid;
+    d["state_topic"] = stateTopic;
+    d["value_template"] = vTpl;
+    if (unit && *unit) d["unit_of_measurement"] = unit;
+    if (devClass && *devClass) d["device_class"] = devClass;
+    if (icon && *icon) d["icon"] = icon;
+    d["availability_topic"] = availTopic;
+    buildDev(d);
+    String p; serializeJson(d, p);
+    mqttClient.publishRaw((String("homeassistant/sensor/") + devId + "/" + eid + "/config").c_str(), p, true);
+  };
+
+  auto bsensor = [&](const char *eid, const char *name, const char *vTpl, const char *icon) {
+    JsonDocument d;
+    d["name"] = name;
+    d["unique_id"] = devId + "_" + eid;
+    d["state_topic"] = stateTopic;
+    d["value_template"] = vTpl;
+    if (icon && *icon) d["icon"] = icon;
+    d["availability_topic"] = availTopic;
+    buildDev(d);
+    String p; serializeJson(d, p);
+    mqttClient.publishRaw((String("homeassistant/binary_sensor/") + devId + "/" + eid + "/config").c_str(), p, true);
+  };
+
+  sensor("soc",         "Battery SOC",       "{{ value_json.soc }}",           "%",  "battery",     "mdi:battery");
+  sensor("voltage",     "Pack Voltage",       "{{ value_json.voltage }}",        "V",  "voltage",     "mdi:flash");
+  sensor("current",     "Pack Current",       "{{ value_json.current }}",        "A",  "current",     "mdi:current-dc");
+  sensor("power",       "Pack Power",         "{{ value_json.power }}",          "W",  "power",       "mdi:lightning-bolt");
+  sensor("remaining_ah","Remaining Ah",       "{{ value_json.remaining_ah }}",   "Ah", "",            "mdi:battery-charging");
+  sensor("cycles",      "Cycle Count",        "{{ value_json.cycles }}",         "",   "",            "mdi:counter");
+  sensor("cell_delta",  "Cell Spread",        "{{ value_json.cell_delta_mv }}",  "mV", "",            "mdi:battery-alert");
+  sensor("mos_temp",    "MOS Temperature",    "{{ value_json.mos_temp_c }}",     tempUnit, "temperature", "mdi:thermometer");
+  sensor("status",      "Activity Status",    "{{ value_json.status }}",         "",   "",            "mdi:information");
+  sensor("ble_link",    "BLE Link",           "{{ value_json.link }}",           "",   "",            "mdi:bluetooth");
+  sensor("health",      "Pack Health",        "{{ value_json.health_pct }}",     "%",  "",            "mdi:heart-pulse");
+  sensor("hours_total", "Total Hours",        "{{ value_json.hours_total }}",    "h",  "duration",    "mdi:clock-outline");
+  sensor("hours_active","Active Hours",       "{{ value_json.hours_active }}",   "h",  "duration",    "mdi:clock-fast");
+  sensor("hours_work",  "Working Hours",      "{{ value_json.hours_working }}",  "h",  "duration",    "mdi:clock-alert");
+  bsensor("is_charging","Is Charging",
+    "{% if value_json.status == 'charging' %}ON{% else %}OFF{% endif %}", "mdi:battery-charging");
+}
+
+void updateMqtt() {
+  if (!settings.mqttEnabled) return;
+  mqttClient.loop();
+  if (!mqttClient.connected()) return;
+
+  // One-time discovery on new connection
+  if (mqttClient.newConnection()) {
+    publishMqttDiscovery();
+    publishMqttState();
+  }
+
+  // Publish on new BMS analog data (M6-06)
+  static uint32_t mqttLastAnalogMs = 0;
+  if (bms.lastAnalogMs > 0 && bms.lastAnalogMs != mqttLastAnalogMs) {
+    mqttLastAnalogMs = bms.lastAnalogMs;
+    publishMqttState();
+    publishMqttCells();
+  }
+
+  // Publish on activity state change (M6-07)
+  static const char *prevStateKey = "";
+  const char *curKey = activityStateKey(activityState());
+  if (curKey != prevStateKey) { prevStateKey = curKey; publishMqttState(); }
+
+  // Heartbeat every 60 s when BMS is not providing fresh data (M6-08)
+  static uint32_t hbMs = 0;
+  if (millis() - hbMs >= 60000UL && (mqttLastAnalogMs == 0 ||
+      millis() - bms.lastAnalogMs > 30000UL)) {
+    hbMs = millis();
+    publishMqttState(true);
+  }
+}
+
+void apiMqttPublishNow() {
+  if (!settings.mqttEnabled || !mqttClient.connected()) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"MQTT not connected\"}");
+    return;
+  }
+  publishMqttState();
+  publishMqttCells();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void apiMqttRediscover() {
+  if (!settings.mqttEnabled || !mqttClient.connected()) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"MQTT not connected\"}");
+    return;
+  }
+  publishMqttDiscovery();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void apiMqttTest() {
+  if (!settings.mqttEnabled || settings.mqttHost.isEmpty()) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"MQTT not configured\"}");
+    return;
+  }
+  JsonDocument doc;
+  doc["ok"] = mqttClient.connected();
+  doc["status"] = mqttClient.statusLabel();
+  doc["broker"] = settings.mqttHost + ":" + String(settings.mqttPort);
+  sendJson(doc);
+}
+
+// ── end MQTT helpers ──────────────────────────────────────────────────────────
+
+// ── Battery degradation tracking ─────────────────────────────────────────────
+
+void loadDegradation() {
+  degradation.maxCellSpreadMv = prefs.getFloat("dMaxSpd", 0.0f);
+  degradation.minCellVoltageV = prefs.getFloat("dMinCv", 9.9f);
+  degradation.maxTempC = prefs.getFloat("dMaxTc", -99.0f);
+  degradation.lowVoltageEvents = prefs.getUInt("dLvEvt", 0);
+  degradation.highCurrentEvents = prefs.getUInt("dHcEvt", 0);
+}
+
+void saveDegradation() {
+  prefs.putFloat("dMaxSpd", degradation.maxCellSpreadMv);
+  prefs.putFloat("dMinCv", degradation.minCellVoltageV);
+  prefs.putFloat("dMaxTc", degradation.maxTempC);
+  prefs.putUInt("dLvEvt", degradation.lowVoltageEvents);
+  prefs.putUInt("dHcEvt", degradation.highCurrentEvents);
+}
+
+void updateDegradation() {
+  if (!bms.found || bms.lastAnalogMs == 0) return;
+  static uint32_t lastDegradMs = 0;
+  if (lastDegradMs == bms.lastAnalogMs) return;
+  lastDegradMs = bms.lastAnalogMs;
+
+  bool dirty = false;
+  if (bms.deltaCellMv > degradation.maxCellSpreadMv) {
+    degradation.maxCellSpreadMv = bms.deltaCellMv; dirty = true;
+  }
+  if (bms.minCellV > 0.1f && bms.minCellV < degradation.minCellVoltageV) {
+    degradation.minCellVoltageV = bms.minCellV; dirty = true;
+  }
+  const float maxTemp = max(bms.mosTempC, bms.pcbTempC);
+  if (maxTemp > 0.0f && maxTemp > degradation.maxTempC) {
+    degradation.maxTempC = maxTemp; dirty = true;
+  }
+  // Low-voltage event: any cell under floor during discharge (deduplicated per discharge cycle)
+  static bool lvThisDischarge = false;
+  if (chargeCurrentA() > 0.5f) lvThisDischarge = false;  // reset on charge
+  if (bms.minCellV > 0.1f && bms.minCellV < settings.lowVoltageFloorV && dischargeCurrentA() > 0.1f && !lvThisDischarge) {
+    lvThisDischarge = true;
+    degradation.lowVoltageEvents++;
+    dirty = true;
+  }
+  // High-current event: sustained discharge above work threshold for 5 s
+  static uint32_t hcStartMs = 0;
+  static bool hcCounted = false;
+  const float workA = max(settings.bladesOnAmps, settings.mowerRunAmps);
+  if (dischargeCurrentA() > workA && workA > 1.0f) {
+    if (hcStartMs == 0) { hcStartMs = millis(); hcCounted = false; }
+    else if (!hcCounted && millis() - hcStartMs >= 5000UL) {
+      hcCounted = true;
+      degradation.highCurrentEvents++;
+      dirty = true;
+    }
+  } else {
+    hcStartMs = 0; hcCounted = false;
+  }
+  if (dirty) saveDegradation();
+}
+
+// ── end degradation ───────────────────────────────────────────────────────────
+
+// ── Maintenance tracker ──────────────────────────────────────────────────────
+
+const char *maintTypeName(MaintType t) {
+  switch (t) {
+    case MaintType::HoursTotal:   return "HOURS_TOTAL";
+    case MaintType::HoursWorking: return "HOURS_WORKING";
+    case MaintType::Days:         return "DAYS";
+    default:                      return "HOURS_ACTIVE";
+  }
+}
+
+MaintType maintTypeFromStr(const char *s) {
+  if (strcmp(s, "HOURS_TOTAL") == 0)   return MaintType::HoursTotal;
+  if (strcmp(s, "HOURS_WORKING") == 0) return MaintType::HoursWorking;
+  if (strcmp(s, "DAYS") == 0)          return MaintType::Days;
+  return MaintType::HoursActive;
+}
+
+uint8_t nextMaintId() {
+  for (uint8_t id = 1; id <= 20; id++) {
+    bool taken = false;
+    for (const auto &it : maintenanceItems) if (it.id == id) { taken = true; break; }
+    if (!taken) return id;
+  }
+  return 0;
+}
+
+void loadMaintenance() {
+  const String json = prefs.getString("maint", "[]");
+  JsonDocument doc;
+  if (deserializeJson(doc, json) != DeserializationError::Ok) return;
+  maintenanceItems.clear();
+  for (JsonObject obj : doc.as<JsonArray>()) {
+    MaintenanceItem item;
+    item.id = obj["id"] | 0;
+    item.name = String(obj["name"] | "");
+    item.type = maintTypeFromStr(obj["type"] | "HOURS_ACTIVE");
+    item.interval = obj["interval"] | 100.0f;
+    item.lastResetTs = obj["last_reset_ts"] | (uint32_t)0;
+    item.lastResetVal = obj["last_reset_val"] | 0.0f;
+    item.notes = String(obj["notes"] | "");
+    if (item.id > 0 && item.id <= 20 && item.name.length() > 0)
+      maintenanceItems.push_back(item);
+  }
+}
+
+void saveMaintenance() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (const auto &item : maintenanceItems) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["id"] = item.id;
+    obj["name"] = item.name;
+    obj["type"] = maintTypeName(item.type);
+    obj["interval"] = serialized(String(item.interval, 2));
+    obj["last_reset_ts"] = item.lastResetTs;
+    obj["last_reset_val"] = serialized(String(item.lastResetVal, 2));
+    obj["notes"] = item.notes;
+  }
+  String out;
+  serializeJson(doc, out);
+  prefs.putString("maint", out);
+}
+
+void initDefaultMaintenanceItems() {
+  if (!maintenanceItems.empty()) return;
+  const struct { const char *name; MaintType type; float interval; const char *notes; } defaults[] = {
+    {"Check blades / cutting edges", MaintType::HoursWorking, 25.0f, ""},
+    {"Inspect tires / wheels",       MaintType::HoursActive,  100.0f, ""},
+    {"Annual inspection",             MaintType::Days,         365.0f, ""},
+  };
+  for (const auto &d : defaults) {
+    MaintenanceItem item;
+    item.id = nextMaintId();
+    item.name = d.name;
+    item.type = d.type;
+    item.interval = d.interval;
+    item.notes = d.notes;
+    maintenanceItems.push_back(item);
+  }
+  saveMaintenance();
+}
+
+float maintCurrentValue(const MaintenanceItem &item) {
+  switch (item.type) {
+    case MaintType::HoursTotal:   return settings.hoursBaseline + hoursTotal;
+    case MaintType::HoursWorking: return hoursWorking;
+    case MaintType::Days: {
+      const time_t now = time(nullptr);
+      return (now > 0 && item.lastResetTs > 0)
+        ? static_cast<float>(now - item.lastResetTs) / 86400.0f : 0.0f;
+    }
+    default: return hoursActive;
+  }
+}
+
+float maintElapsed(const MaintenanceItem &item) {
+  if (item.type == MaintType::Days) return maintCurrentValue(item);
+  return max(0.0f, maintCurrentValue(item) - item.lastResetVal);
+}
+
+bool maintOverdue(const MaintenanceItem &item) {
+  return item.interval > 0.0f && maintElapsed(item) >= item.interval;
+}
+
+uint8_t maintOverdueCount() {
+  uint8_t n = 0;
+  for (const auto &it : maintenanceItems) if (maintOverdue(it)) n++;
+  return n;
+}
+
+void addMaintJsonItem(JsonObject &obj, const MaintenanceItem &item) {
+  obj["id"] = item.id;
+  obj["name"] = item.name;
+  obj["type"] = maintTypeName(item.type);
+  obj["interval"] = serialized(String(item.interval, 2));
+  obj["last_reset_ts"] = item.lastResetTs;
+  obj["last_reset_val"] = serialized(String(item.lastResetVal, 2));
+  obj["notes"] = item.notes;
+  const float elapsed = maintElapsed(item);
+  const float remaining = max(0.0f, item.interval - elapsed);
+  const float pct = item.interval > 0.0f ? min(100.0f, elapsed / item.interval * 100.0f) : 0.0f;
+  obj["elapsed"] = serialized(String(elapsed, 2));
+  obj["remaining"] = serialized(String(remaining, 2));
+  obj["pct"] = serialized(String(pct, 1));
+  obj["overdue"] = maintOverdue(item);
+}
+
+void apiMaintenanceGet() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (const auto &item : maintenanceItems) {
+    JsonObject obj = arr.add<JsonObject>();
+    addMaintJsonItem(obj, item);
+  }
+  sendJson(doc);
+}
+
+void apiMaintenancePost() {
+  const String name = server.arg("name");
+  if (name.isEmpty()) { server.send(400, "text/plain", "name required"); return; }
+  const String typeStr = server.arg("type");
+  const float interval = server.arg("interval").toFloat();
+  if (interval <= 0.0f) { server.send(400, "text/plain", "interval must be > 0"); return; }
+  const uint8_t id = static_cast<uint8_t>(server.arg("id").toInt());
+  MaintenanceItem *existing = nullptr;
+  for (auto &it : maintenanceItems) if (it.id == id) { existing = &it; break; }
+  if (existing) {
+    existing->name = name;
+    existing->type = maintTypeFromStr(typeStr.c_str());
+    existing->interval = interval;
+    existing->notes = server.arg("notes");
+  } else {
+    if (maintenanceItems.size() >= 20) { server.send(400, "text/plain", "max 20 items"); return; }
+    MaintenanceItem item;
+    item.id = nextMaintId();
+    if (!item.id) { server.send(500, "text/plain", "no id available"); return; }
+    item.name = name;
+    item.type = maintTypeFromStr(typeStr.c_str());
+    item.interval = interval;
+    item.notes = server.arg("notes");
+    maintenanceItems.push_back(item);
+    existing = &maintenanceItems.back();
+  }
+  saveMaintenance();
+  JsonDocument doc;
+  JsonObject obj = doc.to<JsonObject>();
+  addMaintJsonItem(obj, *existing);
+  sendJson(doc);
+}
+
+void apiMaintenanceConfirm() {
+  const uint8_t id = static_cast<uint8_t>(server.arg("id").toInt());
+  MaintenanceItem *item = nullptr;
+  for (auto &it : maintenanceItems) if (it.id == id) { item = &it; break; }
+  if (!item) { server.send(404, "text/plain", "item not found"); return; }
+  item->lastResetTs = static_cast<uint32_t>(time(nullptr));
+  item->lastResetVal = maintCurrentValue(*item);
+  saveMaintenance();
+  JsonDocument doc;
+  JsonObject obj = doc.to<JsonObject>();
+  addMaintJsonItem(obj, *item);
+  sendJson(doc);
+}
+
+void apiMaintenanceDelete() {
+  const uint8_t id = static_cast<uint8_t>(server.arg("id").toInt());
+  const auto before = maintenanceItems.size();
+  maintenanceItems.erase(
+    std::remove_if(maintenanceItems.begin(), maintenanceItems.end(),
+      [id](const MaintenanceItem &it){ return it.id == id; }),
+    maintenanceItems.end());
+  if (maintenanceItems.size() == before) { server.send(404, "text/plain", "not found"); return; }
+  saveMaintenance();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// ── end Maintenance tracker ──────────────────────────────────────────────────
+
 void loadSettings() {
   prefs.begin("r48disp", false);
   settings.hostname = prefs.getString("host", defaultHostname());
@@ -1232,6 +2164,7 @@ void loadSettings() {
   settings.bmsName = prefs.getString("bmsName", "");
   settings.bmsProtocol = prefs.getString("bmsProto", settings.bmsProtocol);
   settings.mowerModel = prefs.getString("model", settings.mowerModel);
+  settings.subtitle = prefs.getString("subtitle", settings.subtitle);
   settings.usageCategory = prefs.getString("usage", prefs.getString("vehicle", settings.usageCategory));
   settings.themeId = prefs.getString("theme", settings.themeId);
   settings.dischargeCurrentNegative = prefs.getBool("curNeg", true);
@@ -1246,9 +2179,32 @@ void loadSettings() {
   settings.timezone = prefs.getString("tz", settings.timezone);
   settings.brightness = prefs.getUChar("bright", 210);
   settings.displayRotation = normalizeDisplayRotation(prefs.getUShort("rotation", 0));
+  settings.lcdTimeoutSec = prefs.getUShort("lcdTo", settings.lcdTimeoutSec);
+  settings.powerSaveEnabled = prefs.getBool("pwrSave", settings.powerSaveEnabled);
+  settings.idleBleWakeHours = prefs.getFloat("idleBleH", settings.idleBleWakeHours);
+  settings.lowVoltageFloorV = prefs.getFloat("lvFloorV", settings.lowVoltageFloorV);
+  settings.mqttEnabled = prefs.getBool("mqttEn", settings.mqttEnabled);
+  settings.mqttHost = prefs.getString("mqttHost", settings.mqttHost);
+  settings.mqttPort = static_cast<uint16_t>(prefs.getUInt("mqttPort", settings.mqttPort));
+  settings.mqttUser = prefs.getString("mqttUser", settings.mqttUser);
+  settings.mqttPassword = prefs.getString("mqttPass", settings.mqttPassword);
+  settings.mqttTopicPrefix = prefs.getString("mqttPfx", settings.mqttTopicPrefix);
   settings.featureMic = prefs.getBool("mic", settings.featureMic);
   settings.micRunThreshold = prefs.getFloat("micTh", settings.micRunThreshold);
-  runtimeSeconds = prefs.getULong64("runtime", 0);
+  settings.chargeMinAmps = prefs.getFloat("chgMinA", 0.5f);
+  settings.ntpEnabled = prefs.getBool("ntpOn", true);
+  settings.ntpServer = prefs.getString("ntpHost", DEFAULT_NTP_SERVER);
+  settings.labelCharging = prefs.getString("lblChg", "");
+  settings.labelStandby = prefs.getString("lblStby", "");
+  settings.labelActive = prefs.getString("lblAct", "");
+  settings.labelWorking = prefs.getString("lblWork", "");
+  settings.hoursBaseline = prefs.getFloat("hrsBase", 0.0f);
+  // Hours: migrate from legacy single runtimeSeconds counter into hoursTotal
+  const uint64_t legacyRuntime = prefs.getULong64("runtime", 0);
+  hoursTotal = prefs.getFloat("hrsTotal", legacyRuntime > 0 ? legacyRuntime / 3600.0f : 0.0f);
+  hoursStandby = prefs.getFloat("hrsStby", 0.0f);
+  hoursActive = prefs.getFloat("hrsAct", 0.0f);
+  hoursWorking = prefs.getFloat("hrsWork", 0.0f);
   prefs.end();
 
   settings.hostname = sanitizeHostname(settings.hostname);
@@ -1262,10 +2218,25 @@ void loadSettings() {
   settings.nominalPackAh = constrain(settings.nominalPackAh, 1.0f, 400.0f);
   settings.tempUnit.toUpperCase();
   if (settings.tempUnit != "C") settings.tempUnit = "F";
-  if (settings.timezone.isEmpty()) settings.timezone = "PST8PDT,M3.2.0,M11.1.0";
+  if (settings.subtitle.isEmpty()) settings.subtitle = DEFAULT_SUBTITLE;
+  if (settings.timezone.isEmpty() || settings.timezone == "PST8PDT,M3.2.0,M11.1.0") settings.timezone = DEFAULT_TZ;
+  if (settings.ntpServer.isEmpty()) settings.ntpServer = DEFAULT_NTP_SERVER;
   settings.brightness = constrain(settings.brightness, static_cast<uint8_t>(20), static_cast<uint8_t>(255));
   settings.displayRotation = normalizeDisplayRotation(settings.displayRotation);
+  settings.lcdTimeoutSec = constrain(settings.lcdTimeoutSec, static_cast<uint16_t>(0), static_cast<uint16_t>(3600));
+  settings.idleBleWakeHours = constrain(settings.idleBleWakeHours, 0.25f, 24.0f);
   settings.micRunThreshold = constrain(settings.micRunThreshold, 100.0f, 12000.0f);
+  settings.chargeMinAmps = constrain(settings.chargeMinAmps, 0.1f, 10.0f);
+  // Populate labels from category defaults if not yet user-defined
+  if (settings.labelCharging.isEmpty()) settings.labelCharging = "Recharging";
+  if (settings.labelStandby.isEmpty()) settings.labelStandby = activeUsage().standbyMode;
+  if (settings.labelActive.isEmpty()) settings.labelActive = activeUsage().activeMode;
+  if (settings.labelWorking.isEmpty()) settings.labelWorking = activeUsage().workMode;
+  hoursTotal = max(0.0f, hoursTotal);
+  settings.hoursBaseline = max(0.0f, settings.hoursBaseline);
+  hoursStandby = max(0.0f, hoursStandby);
+  hoursActive = max(0.0f, hoursActive);
+  hoursWorking = max(0.0f, hoursWorking);
   bool knownProtocol = false;
   for (const auto &profile : BMS_PROFILES) {
     if (settings.bmsProtocol == profile.id) knownProtocol = true;
@@ -1283,6 +2254,7 @@ void saveSettings() {
   prefs.putString("bmsName", settings.bmsName);
   prefs.putString("bmsProto", settings.bmsProtocol);
   prefs.putString("model", settings.mowerModel);
+  prefs.putString("subtitle", settings.subtitle);
   prefs.putString("usage", settings.usageCategory);
   prefs.putString("theme", settings.themeId);
   prefs.putBool("curNeg", settings.dischargeCurrentNegative);
@@ -1297,16 +2269,77 @@ void saveSettings() {
   prefs.putString("tz", settings.timezone);
   prefs.putUChar("bright", settings.brightness);
   prefs.putUShort("rotation", settings.displayRotation);
+  prefs.putUShort("lcdTo", settings.lcdTimeoutSec);
+  prefs.putBool("pwrSave", settings.powerSaveEnabled);
+  prefs.putFloat("idleBleH", settings.idleBleWakeHours);
+  prefs.putFloat("lvFloorV", settings.lowVoltageFloorV);
+  prefs.putBool("mqttEn", settings.mqttEnabled);
+  prefs.putString("mqttHost", settings.mqttHost);
+  prefs.putUInt("mqttPort", settings.mqttPort);
+  prefs.putString("mqttUser", settings.mqttUser);
+  prefs.putString("mqttPass", settings.mqttPassword);
+  prefs.putString("mqttPfx", settings.mqttTopicPrefix);
   prefs.putBool("mic", settings.featureMic);
   prefs.putFloat("micTh", settings.micRunThreshold);
+  prefs.putFloat("chgMinA", settings.chargeMinAmps);
+  prefs.putBool("ntpOn", settings.ntpEnabled);
+  prefs.putString("ntpHost", settings.ntpServer);
+  prefs.putString("lblChg", settings.labelCharging);
+  prefs.putString("lblStby", settings.labelStandby);
+  prefs.putString("lblAct", settings.labelActive);
+  prefs.putString("lblWork", settings.labelWorking);
+  prefs.putFloat("hrsBase", settings.hoursBaseline);
   prefs.end();
 }
 
-void saveRuntime() {
+void saveHours() {
   prefs.begin("r48disp", false);
-  prefs.putULong64("runtime", runtimeSeconds);
+  prefs.putFloat("hrsTotal", hoursTotal);
+  prefs.putFloat("hrsStby", hoursStandby);
+  prefs.putFloat("hrsAct", hoursActive);
+  prefs.putFloat("hrsWork", hoursWorking);
   prefs.end();
-  lastRuntimeSaveMs = millis();
+  lastHoursSaveMs = millis();
+}
+
+void loadBmsCache() {
+  prefs.begin("r48disp", true);
+  const bool valid = prefs.getBool("bmsCache", false);
+  if (valid) {
+    bms.soc = prefs.getUChar("cSoc", 0);
+    bms.packVoltage = prefs.getFloat("cVolt", 0.0f);
+    bms.currentA = prefs.getFloat("cCurr", 0.0f);
+    bms.remainingAh = prefs.getFloat("cRemAh", 0.0f);
+    bms.totalAh = prefs.getFloat("cTotAh", 0.0f);
+    bms.designAh = prefs.getFloat("cDsgAh", 0.0f);
+    bms.deltaCellMv = prefs.getFloat("cDelta", 0.0f);
+    bms.cellCount = prefs.getUChar("cCells", 0);
+    const size_t bytes = min<size_t>(prefs.getBytesLength("cCellV"), sizeof(bms.cellVolts));
+    if (bytes > 0) prefs.getBytes("cCellV", bms.cellVolts, bytes);
+    bms.lastAnalogMs = millis();
+    cachedAnalogSourceMs = bms.lastAnalogMs;
+    bms.status = "cached data, waiting for BLE";
+    bmsCacheLoaded = true;
+  }
+  prefs.end();
+}
+
+void saveBmsCache() {
+  if (bms.lastAnalogMs == 0 || bms.packVoltage <= 0.1f) return;
+  prefs.begin("r48disp", false);
+  prefs.putBool("bmsCache", true);
+  prefs.putUChar("cSoc", bms.soc);
+  prefs.putFloat("cVolt", bms.packVoltage);
+  prefs.putFloat("cCurr", bms.currentA);
+  prefs.putFloat("cRemAh", bms.remainingAh);
+  prefs.putFloat("cTotAh", bms.totalAh);
+  prefs.putFloat("cDsgAh", bms.designAh);
+  prefs.putFloat("cDelta", bms.deltaCellMv);
+  prefs.putUChar("cCells", bms.cellCount);
+  prefs.putBytes("cCellV", bms.cellVolts, sizeof(bms.cellVolts));
+  prefs.end();
+  cachedAnalogSourceMs = bms.lastAnalogMs;
+  lastBmsCacheSaveMs = millis();
 }
 
 bool tcaWrite(uint8_t reg, uint8_t value) {
@@ -1321,13 +2354,15 @@ void tcaSetOutput(uint8_t value) {
   tcaWrite(0x01, ioExpanderOutput);
 }
 
-void initIoExpander() {
-  tcaWrite(0x03, 0xF0);
-  tcaWrite(0x02, 0x00);
+bool initIoExpander() {
+  bool ok = tcaWrite(0x03, 0xF0);
+  ok = tcaWrite(0x02, 0x00) && ok;
   tcaSetOutput(0x0C);
   delay(30);
   tcaSetOutput(0x0F);
   delay(150);
+  if (!ok) Serial.println(F("IO expander: write failed — display may not initialize"));
+  return ok;
 }
 
 bool i2cDevicePresent(TwoWire &bus, uint8_t address) {
@@ -1439,8 +2474,48 @@ void updateScreenBattery() {
                               ? static_cast<int16_t>((screenBattery.volts - screenBattery.previousVolts) * 1000.0f)
                               : 0;
   screenBattery.percent = screenBattery.present ? estimateScreenBatteryPercent(screenBattery.volts) : 0;
-  screenBattery.usbCdcConnected = static_cast<bool>(Serial);
-  screenBattery.inputStatus = screenBattery.usbCdcConnected ? "USB data/power present" : "external power";
+  if (screenBattery.present) {
+    if (screenBatteryBootVolts < 0.1f) screenBatteryBootVolts = screenBattery.volts;
+    if (screenBatteryLowVolts < 0.1f || screenBattery.volts < screenBatteryLowVolts) screenBatteryLowVolts = screenBattery.volts;
+  } else {
+    screenBatteryLowVolts = 0.0f;
+    screenBatteryExternalLatched = true;
+    screenBatteryRiseSamples = 0;
+  }
+
+  if (screenBattery.present && screenBattery.deltaMv <= BATTERY_EXTERNAL_DROP_MV) {
+    screenBatteryExternalLatched = false;
+    screenBatteryRiseSamples = 0;
+    screenBatteryLowVolts = screenBattery.volts;
+  } else if (screenBattery.present && screenBattery.previousVolts > 0.1f && screenBattery.deltaMv >= 5) {
+    if (screenBatteryRiseSamples < 4) screenBatteryRiseSamples++;
+  } else if (screenBattery.deltaMv < 0) {
+    screenBatteryRiseSamples = 0;
+  }
+
+  bool usbPowerPresent = static_cast<bool>(Serial);
+#if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+  usbPowerPresent = HWCDC::isPlugged();
+#endif
+  if (usbPowerPresent || !screenBattery.present ||
+      screenBattery.volts >= BATTERY_EXTERNAL_HIGH_V ||
+      screenBattery.deltaMv >= BATTERY_EXTERNAL_FAST_RISE_MV ||
+      (screenBatteryLowVolts > 0.1f &&
+       (screenBattery.volts - screenBatteryLowVolts) >= BATTERY_EXTERNAL_RISE_V &&
+       screenBatteryRiseSamples >= 2)) {
+    screenBatteryExternalLatched = true;
+  }
+  const bool externalPowerInferred = screenBatteryExternalLatched && !usbPowerPresent;
+  screenBattery.usbCdcConnected = usbPowerPresent;
+  if (usbPowerPresent || screenBatteryExternalLatched || !screenBattery.present) {
+    powerSource = PowerSource::External;
+  } else {
+    powerSource = PowerSource::Battery;
+  }
+  screenBattery.inputStatus = usbPowerPresent ? "USB data/power present"
+                              : externalPowerInferred ? "external power inferred"
+                              : powerSource == PowerSource::Battery ? "internal battery"
+                              : "external power";
   if (!screenBattery.present) screenBattery.label = "no board battery";
   else if (screenBattery.volts < 3.35f) screenBattery.label = "critical";
   else if (screenBattery.volts < 3.55f) screenBattery.label = "low";
@@ -1529,6 +2604,32 @@ uint32_t displayRefreshIntervalMs() {
   return DISPLAY_REFRESH_MS;
 }
 
+void syncWifiPowerSave() {
+  if (WiFi.getMode() != WIFI_STA || WiFi.status() != WL_CONNECTED) return;
+  static bool wifiMaxPs = false;
+  const bool wantMax = lastWebRequestMs == 0 || millis() - lastWebRequestMs > 60000UL;
+  if (wantMax && !wifiMaxPs) {
+    esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+    wifiMaxPs = true;
+  } else if (!wantMax && wifiMaxPs) {
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    wifiMaxPs = false;
+  }
+}
+
+void syncCpuFrequency() {
+  const bool wantSlow = displaySleeping &&
+    (blePolicyMode == BlePolicyMode::Idle || blePolicyMode == BlePolicyMode::ActiveSlow);
+  static bool cpuIsLow = false;
+  if (wantSlow && !cpuIsLow) {
+    setCpuFrequencyMhz(80);
+    cpuIsLow = true;
+  } else if (!wantSlow && cpuIsLow) {
+    setCpuFrequencyMhz(240);
+    cpuIsLow = false;
+  }
+}
+
 void manageDisplayPower() {
   if (!displayReady) return;
   if (!settings.displayEnabled) {
@@ -1547,42 +2648,42 @@ void manageDisplayPower() {
     }
     return;
   }
-  if (displayActivityPresent()) {
+  if (!batteryPowerSaveActive() && displayActivityPresent()) {
     wakeDisplay();
     return;
   }
-  if (!displaySleeping && now - lastDisplayActivityMs >= DISPLAY_SLEEP_IDLE_MS) {
+  const uint32_t timeoutMs = displaySleepTimeoutMs();
+  if (timeoutMs > 0 && !displaySleeping && now - lastDisplayActivityMs >= timeoutMs) {
     displaySleeping = true;
     setBacklight(0);
   }
 }
 
-void updateRuntime() {
+void updateHours() {
   const uint32_t now = millis();
-  if (lastRuntimeTickMs == 0) {
-    lastRuntimeTickMs = now;
-    lastRuntimeSaveMs = now;
+  if (lastHoursTickMs == 0) {
+    lastHoursTickMs = now;
+    lastHoursSaveMs = now;
     return;
   }
-  const uint32_t delta = now - lastRuntimeTickMs;
-  lastRuntimeTickMs = now;
-  if (mowerRunning()) {
-    runTimeRemainderMs += delta;
-    const uint32_t seconds = runTimeRemainderMs / 1000;
-    if (seconds > 0) {
-      runtimeSeconds += seconds;
-      rideSessionSeconds += seconds;
-      runTimeRemainderMs %= 1000;
+  const float deltaH = (now - lastHoursTickMs) / 3600000.0f;
+  lastHoursTickMs = now;
+  if (bms.lastAnalogMs > 0 && powerSource != PowerSource::Battery) {
+    hoursTotal += deltaH;
+    const ActivityState state = activityState();
+    switch (state) {
+      case ActivityState::Working:  hoursWorking += deltaH; sessionActiveHours += deltaH; break;
+      case ActivityState::Active:   hoursActive += deltaH;  sessionActiveHours += deltaH; break;
+      case ActivityState::Charging: /* charging time in total only */                      break;
+      default:                      hoursStandby += deltaH;                                break;
     }
-  } else {
-    runTimeRemainderMs = 0;
   }
-  if (now - lastRuntimeSaveMs >= RUNTIME_SAVE_MS) saveRuntime();
+  if (now - lastHoursSaveMs >= RUNTIME_SAVE_MS) saveHours();
 }
 
-void setRuntimeHours(float hours) {
-  runtimeSeconds = static_cast<uint64_t>(max(0.0f, hours) * 3600.0f);
-  saveRuntime();
+void setHoursTotal(float hours) {
+  hoursTotal = max(0.0f, hours - settings.hoursBaseline);
+  saveHours();
 }
 
 void initDisplay() {
@@ -1651,13 +2752,42 @@ void maybeProbeTouch() {
 }
 
 void maybeHandleTouch() {
-  if (!displayReady || !touchReady || millis() - lastTouchMs < 300) return;
-  if (digitalRead(PIN_TOUCH_INT) == HIGH) return;
+  if (!displayReady || !touchReady) return;
+  const bool intLow = digitalRead(PIN_TOUCH_INT) == LOW;
+
+  // Long-press (800 ms, display awake) → toggle power save
+  static uint32_t holdStartMs = 0;
+  static bool holdFired = false;
+  if (intLow && !displaySleeping) {
+    if (holdStartMs == 0) holdStartMs = millis();
+    if (!holdFired && millis() - holdStartMs >= 800UL) {
+      holdFired = true;
+      lastTouchMs = millis();
+      settings.powerSaveEnabled = !settings.powerSaveEnabled;
+      saveSettings();
+      drawDisplay(true);
+    }
+  } else {
+    holdStartMs = 0;
+    holdFired = false;
+  }
+  if (holdFired) return;
+
+  if (millis() - lastTouchMs < 300) return;
+  if (!intLow) return;
   TouchPoint p;
   if (!readTouch(p)) return;
   if (displaySleeping) {
-    lastTouchMs = millis();
-    wakeDisplay();
+    const uint32_t now = millis();
+    const bool doubleTapGesture = p.gesture == 0x0B;
+    const bool softwareDoubleTap = lastSleepTapMs > 0 && now - lastSleepTapMs <= TOUCH_DOUBLE_TAP_MS;
+    lastTouchMs = now;
+    if (doubleTapGesture || softwareDoubleTap) {
+      lastSleepTapMs = 0;
+      wakeDisplay();
+    } else {
+      lastSleepTapMs = now;
+    }
     return;
   }
   markDisplayActivity();
@@ -1679,10 +2809,14 @@ void autoDisplayMode() {
 }
 
 void configureClock() {
-  setenv("TZ", settings.timezone.c_str(), 1);
-  tzset();
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  ntpConfigured = true;
+  if (settings.ntpEnabled && !settings.ntpServer.isEmpty()) {
+    configTzTime(settings.timezone.c_str(), settings.ntpServer.c_str());
+    ntpConfigured = true;
+  } else {
+    setenv("TZ", settings.timezone.c_str(), 1);
+    tzset();
+    ntpConfigured = false;
+  }
 }
 
 void startProvisioningAp() {
@@ -1746,7 +2880,7 @@ void maintainWiFi() {
       mdnsReady = true;
     }
   }
-  if (WiFi.status() == WL_CONNECTED && !ntpConfigured) configureClock();
+  if (WiFi.status() == WL_CONNECTED && settings.ntpEnabled && !ntpConfigured) configureClock();
 }
 
 void setupOta() {
@@ -1798,13 +2932,15 @@ void drawDisplay(bool fullRedraw) {
   s.chargeAmps = chargeCurrentA();
   s.healthPercent = bmsHealthPercent();
   s.remainingAh = effectiveRemainingAh();
+  s.totalAh = effectiveTotalAh();
   s.designAh = effectiveDesignAh();
+  s.cellCount = bms.cellCount;
   s.mode = mowerModeLabel();
   s.runEta = formatHours(runtimeEstimateHours());
   s.chargeEta = packCharging() ? formatHours(chargeEstimateHours()) : "--";
-  s.rideTime = formatDuration(rideSessionSeconds);
+  s.rideTime = formatHours(sessionActiveHours);
   s.temp = formatTemp(bms.pcbTempC);
-  s.runtimeHours = String(runtimeSeconds / 3600.0f, 1) + " h";
+  s.runtimeHours = String(settings.hoursBaseline + hoursTotal, 1) + " h";
   s.wifiConnected = WiFi.status() == WL_CONNECTED;
   s.provisioning = provisioningActive;
   s.wifiRssi = s.wifiConnected ? WiFi.RSSI() : 0;
@@ -1815,8 +2951,13 @@ void drawDisplay(bool fullRedraw) {
   s.bmsTarget = settings.bmsName.length() ? settings.bmsName : bms.name;
   s.bmsAddress = bms.address;
   s.lastError = bms.lastError;
+  s.bmsStatus = bms.status;
   s.screenBattery = screenBattery.present ? String(screenBattery.volts, 2) + "V " + String(screenBattery.percent) + "%" : "no battery";
+  s.powerSource = powerSourceName(powerSource);
+  s.mqttStatus = settings.mqttEnabled ? String("MQTT ") + mqttClient.statusLabel() : String("");
+  s.maintOverdue = maintOverdueCount();
   s.touchReady = touchReady;
+  s.hoursStr = String(hoursActive, 1) + "h act  " + String(hoursWorking, 1) + "h work";
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;
@@ -1843,10 +2984,15 @@ String commonHead(const String &title) {
   String html = F("<!doctype html><html><head><meta charset='utf-8'>"
                   "<meta name='viewport' content='width=device-width,initial-scale=1'>"
                   "<link rel='stylesheet' href='/theme.css'><title>");
+  const String pageTitle = displayTitle();
+  html += escapeHtml(pageTitle);
+  html += F("</title></head><body><header><div class='brand'><span class='mark'></span><div><h1>");
+  html += escapeHtml(pageTitle);
+  html += F("</h1><p>");
+  html += escapeHtml(settings.subtitle);
+  html += F(" - ");
   html += escapeHtml(title);
-  html += F("</title></head><body><header><div class='brand'><span class='mark'></span><div><h1>R48 Power Display</h1><p>Mowers + carts + power - ");
-  html += escapeHtml(title);
-  html += F("</p></div></div><nav><a href='/'>Dashboard</a><a href='/battery'>Battery</a><a href='/settings'>Settings</a><a href='/status'>Status</a><a href='/update'>Update</a></nav></header><main class='wrap'>");
+  html += F("</p></div></div><nav><a href='/'>Dashboard</a><a href='/battery'>Battery</a><a href='/maintenance'>Maintenance</a><a href='/settings'>Settings</a><a href='/status'>Status</a></nav></header><main class='wrap'>");
   return html;
 }
 
@@ -1858,7 +3004,7 @@ String commonFoot() {
 String themeCss() {
   const ThemeProfile &theme = activeTheme();
   String css;
-  css.reserve(4300);
+  css.reserve(7200);
   css += F(":root{color-scheme:dark;");
   css += F("--bg:"); css += cssColor(theme.bg); css += ';';
   css += F("--panel:"); css += cssColor(theme.panel); css += ';';
@@ -1877,20 +3023,34 @@ String themeCss() {
            "h1,h2,h3,p{margin:0}h1{font-size:20px;color:var(--primary)}header p{color:var(--muted);font-size:12px;margin-top:2px}.brand{display:flex;gap:10px;align-items:center}.mark{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--primary),var(--accent));display:block}"
            "nav{display:flex;gap:8px;flex-wrap:wrap}a,button,input,select{font:inherit}nav a,button{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:8px 11px;text-decoration:none;cursor:pointer}button.primary{background:var(--primary);border-color:var(--primary);color:var(--buttonText);font-weight:800}"
            ".wrap{max-width:1180px;margin:0 auto;padding:18px;display:grid;gap:16px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.grid,.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.wide{grid-column:1/-1}.card,.metric,.gauge-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.metric{min-height:104px}.label{color:var(--muted);font-size:13px}.value{font-size:30px;margin-top:6px}.value.sm{font-size:20px;line-height:1.3}.subline{color:var(--muted);text-align:center;margin-top:12px}"
-           ".gauge-card{display:grid;place-items:center}.gauge{width:min(70vw,292px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;position:relative;background:conic-gradient(var(--primary) calc(var(--pct)*1%),var(--line) 0)}.gauge:before{content:'';position:absolute;inset:18px;border-radius:50%;background:var(--panel)}.gauge b,.gauge span{position:relative}.gauge b{font-size:62px;color:var(--primary)}.gauge span{align-self:start;margin-top:-92px;color:var(--muted)}"
+           ".gauge-card{display:grid;place-items:center}.gauge{width:min(60vw,230px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;position:relative;background:conic-gradient(from 135deg,var(--primary) calc(var(--pct)*0.75%),var(--line) 0 75%,transparent 75%)}.gauge:before{content:'';position:absolute;inset:22px;border-radius:50%;background:var(--panel)}.gauge b,.gauge span{position:relative}.gauge b{font-size:42px;font-weight:700;color:var(--primary)}.gauge span{align-self:start;margin-top:-66px;font-size:11px;color:var(--muted)}"
            ".section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}label{display:grid;gap:6px;color:var(--muted);font-size:13px}label.check{display:flex;align-items:center;gap:8px;color:var(--text)}label.check input{width:auto}.hint{color:var(--muted);font-size:12px;line-height:1.35}input,select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}"
-           ".cells{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px}.cell{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:9px;display:grid;gap:6px}.cell span{color:var(--muted);font-size:12px}.cell b{font-size:18px}.cell i{display:block;height:6px;border-radius:6px;background:linear-gradient(90deg,var(--primary2),var(--primary));width:var(--w)}.list{display:grid;gap:8px}.list button{display:flex;justify-content:space-between;text-align:left}.list span{color:var(--muted)}.empty,.note{color:var(--muted);line-height:1.45}table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:500}@media(max-width:760px){header{align-items:flex-start;flex-direction:column}.gauge b{font-size:50px}}");
+           ".cells{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px}.cell{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:9px;display:grid;gap:6px}.cell span{color:var(--muted);font-size:12px}.cell b{font-size:18px}.cell i{display:block;height:6px;border-radius:6px;background:linear-gradient(90deg,var(--primary2),var(--primary));width:var(--w)}.list{display:grid;gap:8px}.list button{display:flex;justify-content:space-between;text-align:left}.list span{color:var(--muted)}.empty,.note{color:var(--muted);line-height:1.45}table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:500}.bms-pack{display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:start;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.pack-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}@media(max-width:760px){header{align-items:flex-start;flex-direction:column}.bms-pack{grid-template-columns:1fr}}");
+  css += F(
+      ".dashboard-panel{display:grid;grid-template-columns:minmax(190px,270px) 1fr;gap:14px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;overflow:hidden}"
+      ".dashboard-panel .gauge-card{background:transparent;border:0;padding:0;min-width:0}.dashboard-gauge{align-self:stretch}.dashboard-panel .gauge{width:min(100%,230px);max-width:230px}"
+      ".dash-stats,.dash-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.dash-strip{align-items:stretch}.dash-stats .metric,.dash-strip .metric{min-width:0}"
+      ".metric,.gauge-card{overflow:hidden;min-width:0}.value{overflow-wrap:anywhere}.bms-pack .gauge-card{min-width:0}.bms-pack .gauge{width:min(100%,220px);max-width:220px}"
+      ".threshold-grid{display:grid;grid-template-columns:minmax(170px,.8fr) minmax(220px,1.2fr);gap:12px;align-items:end}.threshold-grid input:disabled{opacity:.72}"
+      ".settings-group{border-top:1px solid var(--line);padding-top:16px;margin-top:16px}.settings-group h3{margin:0 0 12px;font-size:15px;color:var(--primary)}"
+      ".ble-device{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:8px}.ble-name{font-size:14px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center}.ble-name span{color:var(--muted);font-size:12px}.ble-protos{display:flex;gap:6px;flex-wrap:wrap}.ble-proto{padding:4px 9px;font-size:12px}"
+      "@media(max-width:760px){.dashboard-panel{grid-template-columns:1fr}.threshold-grid{grid-template-columns:1fr}.dash-stats,.dash-strip{grid-template-columns:1fr}}");
   return css;
 }
 
 void sendContentPieces(const String &content, size_t chunkSize = 1024) {
-  for (size_t i = 0; i < content.length(); i += chunkSize) {
-    server.sendContent(content.substring(i, min(i + chunkSize, content.length())));
-    delay(1);
+  WiFiClient client = server.client();
+  const uint8_t *data = reinterpret_cast<const uint8_t *>(content.c_str());
+  const size_t total = content.length();
+  for (size_t offset = 0; offset < total; offset += chunkSize) {
+    const size_t len = min(chunkSize, total - offset);
+    client.write(data + offset, len);
+    delay(0);
   }
 }
 
 void sendPage(const String &title, String (*body)()) {
+  lastWebRequestMs = millis();
   String head = commonHead(title);
   String bodyHtml = body();
   String foot = commonFoot();
@@ -1904,7 +3064,9 @@ void sendPage(const String &title, String (*body)()) {
 
 void sendJson(JsonDocument &doc) {
   String out;
+  out.reserve(measureJson(doc) + 4);
   serializeJson(doc, out);
+  server.sendHeader("Connection", "close");
   server.send(200, "application/json", out);
 }
 
@@ -1914,6 +3076,8 @@ void addStatusJson(JsonDocument &doc) {
   doc["uptime_ms"] = millis();
   doc["uptime"] = formatDuration(millis() / 1000ULL);
   doc["hostname"] = settings.hostname;
+  doc["title"] = displayTitle();
+  doc["subtitle"] = settings.subtitle;
 
   JsonObject wifi = doc["wifi"].to<JsonObject>();
   const bool sta = WiFi.status() == WL_CONNECTED;
@@ -1948,19 +3112,20 @@ void addStatusJson(JsonDocument &doc) {
   usageJson["work_detection"] = settings.workDetection;
   usageJson["audio_assist_available"] = usage.audioAssist;
 
+  const ActivityState aState = activityState();
   JsonObject vehicle = doc["vehicle"].to<JsonObject>();
   vehicle["label"] = settings.mowerModel;
   vehicle["usage_category"] = settings.usageCategory;
   vehicle["usage_label"] = usage.label;
+  vehicle["activity_state"] = activityStateKey(aState);
+  vehicle["activity_label"] = stateLabel(aState);
   vehicle["mode"] = mowerModeLabel();
-  vehicle["runtime_hours"] = serialized(String(runtimeSeconds / 3600.0f, 2));
   vehicle["active"] = activityDetected();
   vehicle["work_likely"] = workDetected();
   vehicle["audio_work_tone"] = usage.audioAssist && R48Mic::toneDetected();
-  vehicle["active_label"] = usage.activeLabel;
-  vehicle["work_label"] = usage.workLabel;
   vehicle["activity_detection"] = settings.activityDetection;
   vehicle["work_detection"] = settings.workDetection;
+  vehicle["charge_min_amps"] = serialized(String(settings.chargeMinAmps, 1));
   vehicle["run_threshold_a"] = serialized(String(settings.mowerRunAmps, 1));
   vehicle["work_threshold_a"] = serialized(String(settings.bladesOnAmps, 1));
   vehicle["load_percent"] = serialized(String(loadPercent(), 1));
@@ -1972,15 +3137,25 @@ void addStatusJson(JsonDocument &doc) {
   vehicle["charge_estimate_hours"] = serialized(String(chargeEstimateHours(), 2));
   vehicle["health_percent_estimate"] = serialized(String(bmsHealthPercent(), 1));
 
+  JsonObject hours = doc["hours"].to<JsonObject>();
+  hours["baseline"] = serialized(String(settings.hoursBaseline, 2));
+  hours["counted"] = serialized(String(hoursTotal, 2));
+  hours["total"] = serialized(String(settings.hoursBaseline + hoursTotal, 2));
+  hours["standby"] = serialized(String(hoursStandby, 2));
+  hours["active"] = serialized(String(hoursActive, 2));
+  hours["working"] = serialized(String(hoursWorking, 2));
+  hours["session_active"] = serialized(String(sessionActiveHours, 2));
+
+  // Keep mower object for backward compatibility with any existing consumers
   JsonObject mower = doc["mower"].to<JsonObject>();
   mower["model"] = settings.mowerModel;
   mower["mode"] = mowerModeLabel();
-  mower["runtime_hours"] = serialized(String(runtimeSeconds / 3600.0f, 2));
+  mower["activity_state"] = activityStateKey(aState);
+  mower["runtime_hours"] = serialized(String(settings.hoursBaseline + hoursTotal, 2));
   mower["mower_running"] = activityDetected();
   mower["blades_likely_on"] = workDetected();
   mower["mic_mower_tone"] = usage.audioAssist && R48Mic::toneDetected();
   mower["run_threshold_a"] = serialized(String(settings.mowerRunAmps, 1));
-  mower["mowing_threshold_a"] = serialized(String(settings.bladesOnAmps, 1));
   mower["work_threshold_a"] = serialized(String(settings.bladesOnAmps, 1));
   mower["load_percent"] = serialized(String(loadPercent(), 1));
   mower["discharge_a"] = serialized(String(dischargeCurrentA(), 2));
@@ -1999,14 +3174,21 @@ void addStatusJson(JsonDocument &doc) {
   b["address"] = bms.address;
   b["status"] = bms.status;
   b["link"] = bmsLinkLabel();
+  b["policy"] = blePolicyName(blePolicyMode);
+  b["soc_rate_pct_per_hour"] = serialized(String(socRatePctPerHour, 2));
+  b["cache_loaded"] = bmsCacheLoaded;
   b["last_error"] = bms.lastError;
   b["connected"] = bms.connected;
   b["authenticated"] = bms.authenticated;
   b["scanning"] = bms.scanning;
   b["rssi"] = bms.rssi;
   b["frames"] = bms.frames;
+  b["bytes"] = bms.bytes;
   b["errors"] = bms.errors;
   b["last_analog_age"] = millisAge(bms.lastAnalogMs);
+  b["last_rx_age"] = millisAge(bms.lastRxMs);
+  b["last_connect_age"] = millisAge(bms.lastConnectMs);
+  b["frame_hex"] = bms.latestFrameHex;
   b["software"] = bms.software;
   b["manufacturer"] = bms.manufacturer;
   b["serial"] = bms.serial;
@@ -2034,9 +3216,21 @@ void addStatusJson(JsonDocument &doc) {
   for (uint8_t i = 0; i < bms.cellCount && i < 32; ++i) avgCell += bms.cellVolts[i];
   if (bms.cellCount > 0) avgCell /= bms.cellCount;
   b["avg_cell_v"] = serialized(String(avgCell, 3));
+  b["found"] = bms.found;
+  b["last_warning_age"] = millisAge(bms.lastWarningMs);
   b["warning_hex"] = bms.warningHex;
+  b["balance_state"] = bms.balanceState;
+  b["balance_current_a"] = serialized(String(bms.balanceCurrentA, 2));
+  b["health_percent"] = serialized(String(bmsHealthPercent(), 1));
   JsonArray cells = b["cells"].to<JsonArray>();
   for (uint8_t i = 0; i < bms.cellCount && i < 32; ++i) cells.add(serialized(String(bms.cellVolts[i], 3)));
+  JsonArray temps = b["temps"].to<JsonArray>();
+  if (bms.mosTempC != 0.0f || bms.tempCount > 0)
+    temps.add(serialized(String(displayTempC(bms.mosTempC), 1)));
+  if (bms.pcbTempC != 0.0f || bms.tempCount > 1)
+    temps.add(serialized(String(displayTempC(bms.pcbTempC), 1)));
+  for (uint8_t i = 0; i < bms.tempCount && i < 14; ++i)
+    temps.add(serialized(String(displayTempC(bms.tempsC[i]), 1)));
 
   JsonObject hardware = doc["hardware"].to<JsonObject>();
   hardware["display_ready"] = displayReady;
@@ -2072,22 +3266,55 @@ void addStatusJson(JsonDocument &doc) {
   display["page_name"] = displayPageName(displayPage);
   display["rotation_degrees"] = settings.displayRotation;
   display["refresh_ms"] = displayRefreshIntervalMs();
-  display["sleep_timeout_ms"] = DISPLAY_SLEEP_IDLE_MS;
+  display["sleep_timeout_ms"] = displaySleepTimeoutMs();
+  display["sleep_timeout_sec"] = settings.lcdTimeoutSec;
 
   JsonObject espBat = doc["screen_battery"].to<JsonObject>();
   espBat["present"] = screenBattery.present;
   espBat["voltage"] = serialized(String(screenBattery.volts, 3));
+  espBat["delta_mv"] = screenBattery.deltaMv;
+  espBat["boot_voltage"] = serialized(String(screenBatteryBootVolts, 3));
+  espBat["low_voltage"] = serialized(String(screenBatteryLowVolts, 3));
+  espBat["rise_samples"] = screenBatteryRiseSamples;
+  espBat["external_latched"] = screenBatteryExternalLatched;
   espBat["percent"] = screenBattery.percent;
   espBat["label"] = screenBattery.label;
   espBat["input_status"] = screenBattery.inputStatus;
+  espBat["usb_detected"] = screenBattery.usbCdcConnected;
+  espBat["power_source"] = powerSourceName(powerSource);
+  espBat["power_save_enabled"] = settings.powerSaveEnabled;
+  espBat["battery_power_saving"] = batteryPowerSaveActive();
+
+  JsonObject mqttObj = doc["mqtt"].to<JsonObject>();
+  mqttObj["enabled"] = settings.mqttEnabled;
+  mqttObj["connected"] = mqttClient.connected();
+  mqttObj["status"] = mqttClient.statusLabel();
+  mqttObj["broker"] = settings.mqttEnabled && !settings.mqttHost.isEmpty()
+    ? settings.mqttHost + ":" + String(settings.mqttPort) : String("");
+
+  JsonObject degr = doc["degradation"].to<JsonObject>();
+  degr["cycle_count"] = bms.cycleCount;
+  const float designAh = max(0.01f, bms.found ? bms.designAh * capacityScale() : settings.nominalPackAh);
+  const float totalAh = bms.found ? bms.totalAh * capacityScale() : 0.0f;
+  const float fadePct = max(0.0f, (designAh - totalAh) / designAh * 100.0f);
+  degr["capacity_fade_pct"] = serialized(String(fadePct, 1));
+  degr["max_cell_spread_mv"] = serialized(String(degradation.maxCellSpreadMv, 1));
+  degr["min_cell_voltage_v"] = degradation.minCellVoltageV < 9.0f ? serialized(String(degradation.minCellVoltageV, 3)) : serialized(String(0.0f, 3));
+  degr["max_temp_c"] = degradation.maxTempC > -98.0f ? serialized(String(degradation.maxTempC, 1)) : serialized(String(0.0f, 1));
+  degr["low_voltage_events"] = degradation.lowVoltageEvents;
+  degr["high_current_events"] = degradation.highCurrentEvents;
+  degr["low_voltage_floor_v"] = serialized(String(settings.lowVoltageFloorV, 2));
 
   JsonObject clock = doc["clock"].to<JsonObject>();
+  clock["ntp_enabled"] = settings.ntpEnabled;
   clock["ntp_configured"] = ntpConfigured;
+  clock["ntp_server"] = settings.ntpEnabled ? settings.ntpServer : String("");
   clock["timezone"] = settings.timezone;
   clock["local_time"] = currentTimeText("%Y-%m-%d %H:%M:%S");
 }
 
 void apiStatus() {
+  lastWebRequestMs = millis();
   JsonDocument doc;
   addStatusJson(doc);
   sendJson(doc);
@@ -2097,12 +3324,14 @@ void apiSettingsGet() {
   JsonDocument doc;
   doc["hostname"] = settings.hostname;
   doc["ap_ssid"] = apSsid;
-  doc["ap_password"] = settings.apPassword;
-  doc["ota_password"] = settings.otaPassword;
+  doc["ap_password_set"] = settings.apPassword.length() >= 8;
+  doc["ota_password_set"] = settings.otaPassword.length() >= 8;
   doc["wifi_ssid"] = settings.wifiSsid;
+  doc["wifi_password_set"] = !settings.wifiPassword.isEmpty();
   doc["bms_name"] = settings.bmsName;
   doc["bms_protocol"] = settings.bmsProtocol;
   doc["mower_model"] = settings.mowerModel;
+  doc["subtitle"] = settings.subtitle;
   doc["usage_category"] = settings.usageCategory;
   doc["vehicle_type"] = settings.usageCategory;
   doc["theme_id"] = settings.themeId;
@@ -2112,15 +3341,38 @@ void apiSettingsGet() {
   doc["work_detection"] = settings.workDetection;
   doc["typical_mow_amps"] = settings.typicalMowAmps;
   doc["mower_run_amps"] = settings.mowerRunAmps;
+  doc["activity_amps"] = settings.mowerRunAmps;
   doc["mowing_detect_amps"] = settings.bladesOnAmps;
+  doc["work_amps"] = settings.bladesOnAmps;
+  doc["charge_min_amps"] = settings.chargeMinAmps;
+  doc["label_charging"] = settings.labelCharging;
+  doc["label_standby"] = settings.labelStandby;
+  doc["label_active"] = settings.labelActive;
+  doc["label_working"] = settings.labelWorking;
   doc["nominal_pack_ah"] = settings.nominalPackAh;
   doc["temp_unit"] = settings.tempUnit;
   doc["timezone"] = settings.timezone;
+  doc["ntp_enabled"] = settings.ntpEnabled;
+  doc["ntp_server"] = settings.ntpServer;
   doc["brightness"] = settings.brightness;
   doc["display_rotation"] = settings.displayRotation;
+  doc["lcd_timeout_sec"] = settings.lcdTimeoutSec;
+  doc["power_save_enabled"] = settings.powerSaveEnabled;
+  doc["idle_ble_wake_hours"] = serialized(String(settings.idleBleWakeHours, 2));
+  doc["low_voltage_floor_v"] = serialized(String(settings.lowVoltageFloorV, 2));
+  doc["mqtt_enabled"] = settings.mqttEnabled;
+  doc["mqtt_host"] = settings.mqttHost;
+  doc["mqtt_port"] = settings.mqttPort;
+  doc["mqtt_user"] = settings.mqttUser;
+  doc["mqtt_password_set"] = !settings.mqttPassword.isEmpty();
+  doc["mqtt_topic_prefix"] = settings.mqttTopicPrefix;
   doc["feature_mic"] = settings.featureMic;
   doc["mic_run_threshold"] = serialized(String(settings.micRunThreshold, 0));
-  doc["runtime_hours"] = serialized(String(runtimeSeconds / 3600.0f, 2));
+  doc["hours_baseline"] = serialized(String(settings.hoursBaseline, 2));
+  doc["hours_total"] = serialized(String(settings.hoursBaseline + hoursTotal, 2));
+  doc["hours_counted"] = serialized(String(hoursTotal, 2));
+  doc["hours_active"] = serialized(String(hoursActive, 2));
+  doc["hours_working"] = serialized(String(hoursWorking, 2));
   sendJson(doc);
 }
 
@@ -2130,6 +3382,9 @@ void apiSettingsPost() {
   const String oldSsid = settings.wifiSsid;
   const uint16_t oldRotation = settings.displayRotation;
   const String oldUsage = settings.usageCategory;
+  const String oldTimezone = settings.timezone;
+  const bool oldNtpEnabled = settings.ntpEnabled;
+  const String oldNtpServer = settings.ntpServer;
   if (server.hasArg("hostname")) settings.hostname = sanitizeHostname(server.arg("hostname"));
   if (server.hasArg("ota_password") && server.arg("ota_password").length() >= 8) settings.otaPassword = server.arg("ota_password");
   if (server.hasArg("wifi_ssid")) settings.wifiSsid = server.arg("wifi_ssid");
@@ -2137,6 +3392,7 @@ void apiSettingsPost() {
   if (server.hasArg("bms_name")) settings.bmsName = server.arg("bms_name");
   if (server.hasArg("bms_protocol")) settings.bmsProtocol = server.arg("bms_protocol");
   if (server.hasArg("mower_model")) settings.mowerModel = server.arg("mower_model");
+  if (server.hasArg("subtitle")) settings.subtitle = server.arg("subtitle");
   if (server.hasArg("usage_category")) settings.usageCategory = server.arg("usage_category");
   else if (server.hasArg("vehicle_type")) settings.usageCategory = server.arg("vehicle_type");
   if (server.hasArg("theme_id")) settings.themeId = server.arg("theme_id");
@@ -2144,19 +3400,47 @@ void apiSettingsPost() {
   if (server.hasArg("display_enabled")) settings.displayEnabled = server.arg("display_enabled") == "1";
   if (server.hasArg("activity_detection")) settings.activityDetection = server.arg("activity_detection") == "1";
   if (server.hasArg("work_detection")) settings.workDetection = server.arg("work_detection") == "1";
-  if (server.hasArg("typical_mow_amps")) settings.typicalMowAmps = constrain(server.arg("typical_mow_amps").toFloat(), 5.0f, 160.0f);
-  if (server.hasArg("mower_run_amps")) settings.mowerRunAmps = constrain(server.arg("mower_run_amps").toFloat(), 1.0f, 80.0f);
-  if (server.hasArg("mowing_detect_amps")) settings.bladesOnAmps = constrain(server.arg("mowing_detect_amps").toFloat(), settings.mowerRunAmps, 200.0f);
+  if (server.hasArg("typical_mow_amps")) settings.typicalMowAmps = constrain(server.arg("typical_mow_amps").toFloat(), 5.0f, 300.0f);
+  if (server.hasArg("mower_run_amps")) settings.mowerRunAmps = constrain(server.arg("mower_run_amps").toFloat(), 1.0f, 300.0f);
+  if (server.hasArg("mowing_detect_amps")) settings.bladesOnAmps = constrain(server.arg("mowing_detect_amps").toFloat(), settings.mowerRunAmps, 400.0f);
   if (server.hasArg("nominal_pack_ah")) settings.nominalPackAh = constrain(server.arg("nominal_pack_ah").toFloat(), 1.0f, 400.0f);
   if (server.hasArg("timezone")) settings.timezone = server.arg("timezone");
   if (server.hasArg("brightness")) settings.brightness = constrain(static_cast<uint8_t>(server.arg("brightness").toInt()), static_cast<uint8_t>(20), static_cast<uint8_t>(255));
   if (server.hasArg("display_rotation")) settings.displayRotation = normalizeDisplayRotation(server.arg("display_rotation").toInt());
+  if (server.hasArg("lcd_timeout_sec")) settings.lcdTimeoutSec = constrain(static_cast<uint16_t>(server.arg("lcd_timeout_sec").toInt()), static_cast<uint16_t>(0), static_cast<uint16_t>(3600));
+  if (server.hasArg("power_save_enabled")) settings.powerSaveEnabled = server.arg("power_save_enabled") == "1" || server.arg("power_save_enabled") == "true" || server.arg("power_save_enabled") == "on";
+  if (server.hasArg("idle_ble_wake_hours")) settings.idleBleWakeHours = constrain(server.arg("idle_ble_wake_hours").toFloat(), 0.25f, 24.0f);
+  if (server.hasArg("low_voltage_floor_v")) settings.lowVoltageFloorV = constrain(server.arg("low_voltage_floor_v").toFloat(), 2.0f, 3.8f);
+  if (server.hasArg("mqtt_enabled")) settings.mqttEnabled = server.arg("mqtt_enabled") == "1" || server.arg("mqtt_enabled") == "on" || server.arg("mqtt_enabled") == "true";
+  if (server.hasArg("mqtt_host")) settings.mqttHost = server.arg("mqtt_host");
+  if (server.hasArg("mqtt_port")) settings.mqttPort = static_cast<uint16_t>(constrain(server.arg("mqtt_port").toInt(), 1, 65535));
+  if (server.hasArg("mqtt_user")) settings.mqttUser = server.arg("mqtt_user");
+  if (server.hasArg("mqtt_password") && server.arg("mqtt_password").length() > 0) settings.mqttPassword = server.arg("mqtt_password");
+  if (server.hasArg("mqtt_topic_prefix")) settings.mqttTopicPrefix = server.arg("mqtt_topic_prefix");
   if (server.hasArg("feature_mic")) settings.featureMic = server.arg("feature_mic") == "1";
   if (server.hasArg("mic_run_threshold")) settings.micRunThreshold = constrain(server.arg("mic_run_threshold").toFloat(), 100.0f, 12000.0f);
-  if (server.hasArg("runtime_hours")) setRuntimeHours(server.arg("runtime_hours").toFloat());
+  if (server.hasArg("charge_min_amps")) settings.chargeMinAmps = constrain(server.arg("charge_min_amps").toFloat(), 0.1f, 200.0f);
+  if (server.hasArg("label_charging") && server.arg("label_charging").length() > 0) settings.labelCharging = server.arg("label_charging");
+  if (server.hasArg("label_standby") && server.arg("label_standby").length() > 0) settings.labelStandby = server.arg("label_standby");
+  if (server.hasArg("label_active") && server.arg("label_active").length() > 0) settings.labelActive = server.arg("label_active");
+  if (server.hasArg("label_working") && server.arg("label_working").length() > 0) settings.labelWorking = server.arg("label_working");
+  if (server.hasArg("ntp_enabled")) settings.ntpEnabled = server.arg("ntp_enabled") == "1";
+  if (server.hasArg("ntp_server")) settings.ntpServer = server.arg("ntp_server");
+  if (server.hasArg("hours_baseline")) settings.hoursBaseline = max(0.0f, server.arg("hours_baseline").toFloat());
+  if (server.hasArg("hours_total")) setHoursTotal(server.arg("hours_total").toFloat());
+  if (server.hasArg("runtime_hours")) setHoursTotal(server.arg("runtime_hours").toFloat());
   if (!validUsageCategory(settings.usageCategory)) settings.usageCategory = USAGE_CATEGORIES[0].id;
-  if (!server.hasArg("theme_id") && oldUsage != settings.usageCategory) settings.themeId = activeUsage().defaultThemeId;
+  if (oldUsage != settings.usageCategory) {
+    if (!server.hasArg("theme_id")) settings.themeId = activeUsage().defaultThemeId;
+    // Reset labels to new category defaults unless the user also sent new labels this request
+    if (!server.hasArg("label_standby")) settings.labelStandby = activeUsage().standbyMode;
+    if (!server.hasArg("label_active")) settings.labelActive = activeUsage().activeMode;
+    if (!server.hasArg("label_working")) settings.labelWorking = activeUsage().workMode;
+  }
   if (!validThemeId(settings.themeId)) settings.themeId = activeUsage().defaultThemeId;
+  if (settings.subtitle.isEmpty()) settings.subtitle = DEFAULT_SUBTITLE;
+  if (settings.timezone.isEmpty() || settings.timezone == "PST8PDT,M3.2.0,M11.1.0") settings.timezone = DEFAULT_TZ;
+  if (settings.ntpServer.isEmpty()) settings.ntpServer = DEFAULT_NTP_SERVER;
   if (settings.bladesOnAmps < settings.mowerRunAmps) settings.bladesOnAmps = settings.mowerRunAmps;
   if (settings.apPassword.length() < 8) settings.apPassword = "r48display";
   if (settings.otaPassword.length() < 8) settings.otaPassword = "r48display";
@@ -2167,9 +3451,13 @@ void apiSettingsPost() {
     gfx->fillScreen(COLOR_BG);
   }
   setBacklight(settings.displayEnabled ? settings.brightness : 0);
-  configureClock();
+  if (oldTimezone != settings.timezone || oldNtpEnabled != settings.ntpEnabled || oldNtpServer != settings.ntpServer) {
+    ntpConfigured = false;
+    configureClock();
+  }
   if (oldBms != settings.bmsName || oldProto != settings.bmsProtocol) bleBms.reconnect();
   if (oldSsid != settings.wifiSsid && !settings.wifiSsid.isEmpty()) pendingStaStart = true;
+  setupMqtt();
   drawDisplay(true);
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -2223,6 +3511,12 @@ void apiUsageCategories() {
 void apiWifiScan() {
   const wifi_mode_t oldMode = WiFi.getMode();
   const int count = WiFi.scanNetworks(false, true);
+  if (count < 0) {
+    WiFi.scanDelete();
+    if (oldMode == WIFI_AP) WiFi.mode(WIFI_AP);
+    server.send(503, "application/json", "{\"networks\":[],\"error\":\"wifi scan failed\"}");
+    return;
+  }
   JsonDocument doc;
   JsonArray networks = doc["networks"].to<JsonArray>();
   for (int i = 0; i < count; ++i) {
@@ -2356,9 +3650,10 @@ void handleUpdateUpload() {
 void setupRoutes() {
   server.on("/", HTTP_GET, []() { sendPage("Dashboard", R48Web::dashboardBody); });
   server.on("/battery", HTTP_GET, []() { sendPage("Battery", R48Web::batteryBody); });
+  server.on("/maintenance", HTTP_GET, []() { sendPage("Maintenance", R48Web::maintenanceBody); });
   server.on("/settings", HTTP_GET, []() { sendPage("Settings", R48Web::settingsBody); });
   server.on("/status", HTTP_GET, []() { sendPage("Status", R48Web::statusBody); });
-  server.on("/update", HTTP_GET, handleUpdateGet);
+  server.on("/update", HTTP_GET, []() { server.sendHeader("Location", "/settings"); server.send(302); });
   server.on("/update", HTTP_POST, handleUpdatePostDone, handleUpdateUpload);
   server.on("/theme.css", HTTP_GET, []() { server.send(200, "text/css", themeCss()); });
   server.on("/app.js", HTTP_GET, []() { server.send(200, "application/javascript", R48Web::appScript()); });
@@ -2377,6 +3672,13 @@ void setupRoutes() {
   server.on("/api/display/next", HTTP_POST, apiDisplayNext);
   server.on("/api/display/page", HTTP_POST, apiDisplayPage);
   server.on("/api/reboot", HTTP_POST, apiReboot);
+  server.on("/api/maintenance", HTTP_GET, apiMaintenanceGet);
+  server.on("/api/maintenance", HTTP_POST, apiMaintenancePost);
+  server.on("/api/maintenance/confirm", HTTP_POST, apiMaintenanceConfirm);
+  server.on("/api/maintenance/delete", HTTP_POST, apiMaintenanceDelete);
+  server.on("/api/mqtt/publish-now", HTTP_POST, apiMqttPublishNow);
+  server.on("/api/mqtt/rediscover", HTTP_POST, apiMqttRediscover);
+  server.on("/api/mqtt/test", HTTP_GET, apiMqttTest);
   server.onNotFound([]() {
     server.sendHeader("Location", "/", true);
     server.send(302, "text/plain", "");
@@ -2394,6 +3696,23 @@ void setup() {
   delay(200);
   Serial.println();
   Serial.println(F("R48Display booting"));
+  {
+    const esp_reset_reason_t reason = esp_reset_reason();
+    const char *reasonName = "unknown";
+    switch (reason) {
+      case ESP_RST_POWERON:  reasonName = "power-on";          break;
+      case ESP_RST_EXT:      reasonName = "external";          break;
+      case ESP_RST_SW:       reasonName = "software";          break;
+      case ESP_RST_PANIC:    reasonName = "panic";             break;
+      case ESP_RST_INT_WDT:  reasonName = "interrupt watchdog";break;
+      case ESP_RST_TASK_WDT: reasonName = "task watchdog";     break;
+      case ESP_RST_WDT:      reasonName = "other watchdog";    break;
+      case ESP_RST_DEEPSLEEP:reasonName = "deep sleep";        break;
+      case ESP_RST_BROWNOUT: reasonName = "brownout";          break;
+      default: break;
+    }
+    Serial.printf("Reset reason: %s\n", reasonName);
+  }
   if (psramFound()) {
     heap_caps_malloc_extmem_enable(4096);
     Serial.printf("PSRAM enabled: %u bytes\n", static_cast<unsigned>(ESP.getPsramSize()));
@@ -2401,6 +3720,11 @@ void setup() {
     Serial.println(F("PSRAM not detected"));
   }
   loadSettings();
+  setupMqtt();
+  loadDegradation();
+  loadMaintenance();
+  initDefaultMaintenanceItems();
+  loadBmsCache();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.setClock(400000);
   initDisplay();
@@ -2423,19 +3747,35 @@ void loop() {
   ArduinoOTA.handle();
   maintainWiFi();
   bleBms.loop();
+  updateSocRate();
+  updateDegradation();
+  updateMqtt();
+  if (bms.lastAnalogMs > 0 && bms.lastAnalogMs != cachedAnalogSourceMs &&
+      (lastBmsCacheSaveMs == 0 || millis() - lastBmsCacheSaveMs > 300000UL)) {
+    saveBmsCache();
+  }
   R48Mic::loop(activityDetected());
-  updateRuntime();
+  updateHours();
   maybeProbeTouch();
   maybeHandleTouch();
   pollButtons();
-  R48DisplayUi::tick();
+  R48DisplayUi::tick(displaySleeping);
   autoDisplayMode();
   manageDisplayPower();
+  syncCpuFrequency();
+  syncWifiPowerSave();
 
   const uint32_t now = millis();
   if (now - lastBatteryMs >= BATTERY_REFRESH_MS) {
     lastBatteryMs = now;
     updateScreenBattery();
+    // Graceful shutdown on critically low board battery
+    if (screenBattery.present && !screenBattery.usbCdcConnected &&
+        screenBattery.percent <= 4 && screenBattery.volts < 3.4f) {
+      saveSettings(); saveMaintenance(); saveDegradation();
+      delay(80);
+      digitalWrite(PIN_BATTERY_HOLD, LOW);
+    }
   }
   if (now - lastDisplayMs >= displayRefreshIntervalMs()) {
     lastDisplayMs = now;
