@@ -12,7 +12,7 @@ String dashboardBody() {
       "</section>"
       "<section class='dashboard-panel'>"
       "<div class='gauge-card dashboard-gauge'>"
-      "<div class='gauge' id='soc-gauge' style='--pct:0'><b id='dash-soc'>--</b><span>SOC</span></div>"
+      "<div class='gauge' id='soc-gauge' style='--pct:0'><b id='dash-soc'>--</b></div>"
       "<div class='subline' id='dash-mode'>Waiting for BMS</div>"
       "</div>"
       "<div class='dash-stats'>"
@@ -73,7 +73,7 @@ String batteryBody() {
       // Pack overview
       "<section class='bms-pack'>"
       "<div class='gauge-card'>"
-      "<div class='gauge' id='bat-soc-gauge' style='--pct:0'><b id='bat-soc'>--</b><span>SOC</span></div>"
+      "<div class='gauge' id='bat-soc-gauge' style='--pct:0'><b id='bat-soc'>--</b></div>"
       "</div>"
       "<div class='pack-cols'>"
       "<div class='metric'><div class='label'>Voltage</div><div class='value' id='bat-pack'>--</div></div>"
