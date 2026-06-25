@@ -208,6 +208,7 @@ esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x0 R48Display-vX.Y.Z-mer
 - [`TASKS.md`](TASKS.md) — development task list by milestone
 - [`VALIDATION.md`](VALIDATION.md) — release validation checklist
 - [`PROMPT.md`](PROMPT.md) — development philosophy and rules
+- [`docs/RYOBI_48V.md`](docs/RYOBI_48V.md) — Ryobi 48V riding mower installation guide
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module organization
 - [`docs/POWER_MANAGEMENT.md`](docs/POWER_MANAGEMENT.md) — power saving spec
 - [`docs/MAINTENANCE_TRACKER.md`](docs/MAINTENANCE_TRACKER.md) — hour meter and reminders
