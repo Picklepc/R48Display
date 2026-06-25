@@ -42,10 +42,11 @@ jobs:
       - name: Create merged binary
         run: |
           ESPTOOL=$(find ~/.platformio -name esptool.py | head -1)
-          BOOT=$(find ~/.platformio -name bootloader.bin | grep waveshare | head -1)
-          PARTS=.pio/build/waveshare_esp32_s3_touch_lcd_1_85/partitions.bin
+          BUILD=.pio/build/waveshare_esp32_s3_touch_lcd_1_85
+          BOOT=$BUILD/bootloader.bin
+          PARTS=$BUILD/partitions.bin
           BOOT_APP0=$(find ~/.platformio -name boot_app0.bin | head -1)
-          APP=.pio/build/waveshare_esp32_s3_touch_lcd_1_85/firmware.bin
+          APP=$BUILD/firmware.bin
           python "$ESPTOOL" --chip esp32s3 merge_bin \
             -o firmware-merged.bin \
             --flash_mode qio --flash_freq 80m --flash_size 16MB \
