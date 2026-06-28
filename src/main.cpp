@@ -2396,9 +2396,20 @@ String i2cAddressCsv(TwoWire &bus) {
 }
 
 void initBatteryPowerHold() {
+  // Set HIGH immediately so the device survives setup() regardless of settings.
+  // applyBatteryHold() corrects this after loadSettings() runs.
   pinMode(PIN_BATTERY_HOLD, OUTPUT);
   digitalWrite(PIN_BATTERY_HOLD, HIGH);
   pinMode(PIN_BATTERY_KEY, INPUT_PULLUP);
+}
+
+void applyBatteryHold() {
+  // Power save ON  → hold HIGH: battery stays enabled when USB is removed.
+  // Power save OFF → hold LOW:  no battery backup; USB removal causes instant
+  //                              hardware power-off via the PMU, no software
+  //                              detection required. PMU restarts automatically
+  //                              when USB VBUS is reconnected.
+  digitalWrite(PIN_BATTERY_HOLD, settings.powerSaveEnabled ? HIGH : LOW);
 }
 
 void calibrateButtonIdle(ButtonTracker &button) {
@@ -3415,7 +3426,10 @@ void apiSettingsPost() {
   if (server.hasArg("brightness")) settings.brightness = constrain(static_cast<uint8_t>(server.arg("brightness").toInt()), static_cast<uint8_t>(20), static_cast<uint8_t>(255));
   if (server.hasArg("display_rotation")) settings.displayRotation = normalizeDisplayRotation(server.arg("display_rotation").toInt());
   if (server.hasArg("lcd_timeout_sec")) settings.lcdTimeoutSec = constrain(static_cast<uint16_t>(server.arg("lcd_timeout_sec").toInt()), static_cast<uint16_t>(0), static_cast<uint16_t>(3600));
-  if (server.hasArg("power_save_enabled")) settings.powerSaveEnabled = server.arg("power_save_enabled") == "1" || server.arg("power_save_enabled") == "true" || server.arg("power_save_enabled") == "on";
+  if (server.hasArg("power_save_enabled")) {
+    settings.powerSaveEnabled = server.arg("power_save_enabled") == "1" || server.arg("power_save_enabled") == "true" || server.arg("power_save_enabled") == "on";
+    applyBatteryHold();
+  }
   if (server.hasArg("idle_ble_wake_hours")) settings.idleBleWakeHours = constrain(server.arg("idle_ble_wake_hours").toFloat(), 0.25f, 24.0f);
   if (server.hasArg("low_voltage_floor_v")) settings.lowVoltageFloorV = constrain(server.arg("low_voltage_floor_v").toFloat(), 2.0f, 3.8f);
   if (server.hasArg("board_battery_low_pct")) settings.boardBatteryLowPct = (uint8_t)constrain(server.arg("board_battery_low_pct").toInt(), 5, 80);
@@ -3741,6 +3755,7 @@ void setup() {
     Serial.println(F("PSRAM not detected"));
   }
   loadSettings();
+  applyBatteryHold();
   setupMqtt();
   loadDegradation();
   loadMaintenance();
@@ -3790,23 +3805,10 @@ void loop() {
   if (now - lastBatteryMs >= BATTERY_REFRESH_MS) {
     lastBatteryMs = now;
     updateScreenBattery();
-    // Shutdown when USB removed and power save is off.
-    // usbEverSeen ensures shutdown only triggers on a transition (was present → now gone),
-    // not on the ambiguous state right after a PMU-restart where SOF and battery inference
-    // haven't settled yet — prevents a re-shutdown boot loop on USB reconnect.
-    static bool usbEverSeen = false;
-    static uint32_t usbGoneMs = 0;
-    if (screenBattery.usbCdcConnected) usbEverSeen = true;
-    if (screenBattery.present && !screenBattery.usbCdcConnected && usbEverSeen) {
-      if (usbGoneMs == 0) usbGoneMs = now;
-      else if (!settings.powerSaveEnabled && now - usbGoneMs > 8000UL) {
-        saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
-        delay(80);
-        digitalWrite(PIN_BATTERY_HOLD, LOW);
-      }
-    } else {
-      usbGoneMs = 0;
-    }
+    // USB removal shutdown is hardware-managed via applyBatteryHold():
+    // power save OFF → GPIO 6 LOW → PMU cuts power the instant USB VBUS disappears.
+    // No software detection needed for that path.
+
     // Graceful shutdown on critically low board battery
     if (screenBattery.present && !screenBattery.usbCdcConnected &&
         screenBattery.percent <= 4 && screenBattery.volts < 3.4f) {
