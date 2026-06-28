@@ -16,12 +16,35 @@ to `TASKS.md` milestone M1.
 
 The Waveshare ESP32-S3 Touch LCD 1.85 battery circuit uses:
 
-- **GPIO 6** — battery hold (keep power on; pull low to cut power)
-- **GPIO 7** — battery key / power button sense
+- **GPIO 6** — battery HOLD (active HIGH keeps PMU output alive; driving LOW
+  removes the "keep alive" signal but does NOT immediately cut power while the
+  ESP32 is drawing significant current)
+- **GPIO 7** — battery KEY / power button (driving LOW for ~250 ms simulates a
+  button press and immediately toggles the PMU output OFF regardless of load)
 - **GPIO 8** — battery ADC (raw voltage divider reading of the LiPo cell)
 
 USB VBUS detection is available via the ESP32-S3 USB PHY or by sensing whether
 the 5 V rail reads above the battery LDO output voltage.
+
+### Shutdown Sequence
+
+All graceful shutdowns call `triggerBatteryOff()`:
+
+```cpp
+void triggerBatteryOff() {
+  digitalWrite(PIN_BATTERY_HOLD, LOW);   // remove hold signal
+  pinMode(PIN_BATTERY_KEY, OUTPUT);
+  digitalWrite(PIN_BATTERY_KEY, LOW);   // simulate KEY press
+  delay(250);                            // PMU detects press and cuts output
+  digitalWrite(PIN_BATTERY_KEY, HIGH);
+  pinMode(PIN_BATTERY_KEY, INPUT_PULLUP);
+}
+```
+
+Using only GPIO 6 (HOLD LOW) was found to be insufficient — the IP5306 and
+compatible PMUs only auto-shutoff when load drops below their minimum threshold
+(~100 mA). The ESP32 running WiFi and BLE exceeds this constantly. GPIO 7 (KEY
+press) toggles the PMU immediately regardless of load.
 
 ### Power Source States
 
@@ -51,9 +74,8 @@ When `POWER_BATTERY` is detected and the ADC reads below the emergency floor
 (≈ 3.1 V cell equivalent):
 
 1. Log the low-battery event.
-2. Display "Battery critically low — shutting down" on LCD for 3 s.
-3. Save all NVS state (hours, maintenance, settings).
-4. Pull GPIO 6 LOW to cut power via the hold circuit.
+2. Save all NVS state (hours, maintenance, settings).
+3. Call `triggerBatteryOff()` — pulls HOLD LOW then pulses KEY LOW for 250 ms.
 
 ---
 
@@ -255,23 +277,20 @@ falls back to the cache with a stale indicator.
 
 ## Power Management Settings
 
-Add a "Power Management" section to the web settings page:
+The Settings → Power Management card in the web UI exposes:
 
-| Setting | Type | Default | Description |
+| Setting | NVS Key | Default | Description |
 |---|---|---|---|
-| `powerSource` | read-only | — | Detected power source (USB / Battery / Unknown) |
-| `batteryPowerMode` | enum | `auto` | `auto`, `always_full`, `always_save` |
-| `lcdTimeoutSec` | integer | 300 (USB), 120 (battery) | LCD sleep timeout in seconds (0 = use hard cap on battery) |
-| `idleWakeIntervalH` | float | 6.0 | Hours between BLE wake cycles in IDLE mode |
-| `ntpEnabled` | bool | false | Enable NTP time sync |
-| `ntpServer` | string | "" | LAN NTP server hostname or IP |
+| Enable Internal Battery | `pwrSave` | false | Enables backup power and power-save features |
+| LCD Timeout (s) | `lcdTo` | 300 | Screen sleep timeout; 0 = always on (120 s hard cap on battery) |
+| Idle BLE Wake Hours | `idleBleH` | 6.0 | Hours between BLE wake cycles in IDLE mode |
+| Low Voltage Floor (V/cell) | `lvFloorV` | 3.00 | Cells below this trigger a low-voltage event |
+| Low Battery Threshold (%) | `bbLowPct` | 20 | Board battery % below which low-power mode activates and hours pause |
 
-`batteryPowerMode`:
-- `auto` — decision tree applies as described above
-- `always_full` — use FULL polling regardless of power source (useful for
-  testing or when plugged into a power supply without USB VBUS sense)
-- `always_save` — use maximum power saving even on USB (useful for low-power
-  supply scenarios)
+**Cut Battery Power** button (POST `/api/battery/off`): saves all NVS data then
+calls `triggerBatteryOff()`. Device shuts down immediately if running on battery;
+stays alive on USB with battery output cut. Use this for manual shutdown when
+USB is removed and auto-detection has not yet fired.
 
 ---
 

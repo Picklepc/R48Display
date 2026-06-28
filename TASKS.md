@@ -377,6 +377,64 @@ Each entity publishes a config message to `homeassistant/<component>/r48display_
 
 ---
 
+---
+
+## Milestone 7 — v0.2.x Stability & Power Fixes
+
+Post-release incremental fixes shipped in v0.2.1 through v0.2.3.
+
+### Display & UX
+
+- [x] **M7-01** LVGL battery page layout: CAPACITY removed, CELLS/TEMP moved to
+      lower inward row, SPREAD widened to full center row. WATTS metric merged
+      drain+charge into one centered indicator on dashboard.
+- [x] **M7-02** Hours abbreviation corrected: "h work" → "h wrk" on LVGL battery
+      page HOURS metric.
+- [x] **M7-03** Status page BATT metric added: shows "on" / "off" for internal
+      battery backup state (was PWR/SAVE).
+
+### Web Dashboard & Settings
+
+- [x] **M7-04** Mic RMS added to Device card above Heap Free. Shows live RMS when
+      mic is enabled, "disabled" otherwise.
+- [x] **M7-05** Settings > Power Management restructured: "Enable Internal Battery"
+      toggle at top; LCD timeout, idle BLE wake, low-voltage floor, and low battery
+      threshold collapse into `#batt-options` div shown only when battery is ON.
+- [x] **M7-06** **Cut Battery Power** button added inside `#batt-options`. POST
+      `/api/battery/off` saves NVS then pulses GPIO 7 KEY for 250 ms.
+- [x] **M7-07** Configurable board battery low threshold (`boardBatteryLowPct`,
+      NVS key `bbLowPct`, default 20 %). When board battery drops below this:
+      low-power mode activates and hour counting pauses.
+- [x] **M7-08** Install hours (baseline) can be updated independently from counted
+      hours. `baselineChanged` guard in `apiSettingsPost()` skips `setHoursTotal()`
+      when only the baseline field changes, preventing counted hours from zeroing.
+
+### Shutdown & Power
+
+- [x] **M7-09** `triggerBatteryOff()` replaces all bare `delay(80) +
+      digitalWrite(PIN_BATTERY_HOLD, LOW)` sequences. Drives GPIO 6 (HOLD) LOW
+      then pulses GPIO 7 (KEY) LOW for 250 ms — the KEY press immediately toggles
+      the PMU regardless of load. GPIO 6 alone was insufficient because the IP5306
+      only auto-shutoffs when load drops below ~100 mA, which never happens while
+      WiFi and BLE are active.
+- [x] **M7-10** `BatterySample.usbSofDetected` added: SOF-only detection (strict)
+      separate from `usbCdcConnected` (broad inference). Shutdown block uses two
+      independent paths: SOF-gone (immediate) and inference-gone (battery % drops
+      below 80 % after being above it — slower fallback for DCP charger ports).
+- [x] **M7-11** `setup()` calls `saveSettings()` after `loadSettings()` to seed
+      any NVS keys that didn't exist yet (fields added in recent firmware updates
+      such as `title`, `hoursBaseline`, `boardBatteryLowPct`) so they persist
+      across the next reboot before the user visits the settings form.
+
+### NVS Persistence Fixes
+
+- [x] **M7-12** `loadDegradation()`, `saveDegradation()`, `loadMaintenance()`,
+      `saveMaintenance()` each wrapped with their own `prefs.begin()`/`prefs.end()`
+      pair. All four were silently failing because the preceding `loadSettings()` /
+      `saveSettings()` call had already closed the NVS handle.
+
+---
+
 ## Backlog (Post-v1.0.0)
 
 These are desirable but explicitly out of scope for the initial stable release.

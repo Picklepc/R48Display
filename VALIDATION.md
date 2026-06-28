@@ -167,8 +167,12 @@ Requires a device with the onboard LiPo circuit populated.
       page swipe.
 - [ ] CPU frequency drops to 80 MHz when display is sleeping in IDLE or
       ACTIVE_SLOW mode. Confirm with `getCpuFrequencyMhz()` log output.
-- [ ] No-battery condition (ADC below threshold) → device logs shutdown
-      warning and cuts power via hold pin.
+- [ ] Critical battery (≤ 4%, < 3.4 V) with no USB → device saves NVS and
+      cuts power via `triggerBatteryOff()` (GPIO 7 KEY press, 250 ms).
+- [ ] **Cut Battery Power** button visible in Settings → Power Management when
+      battery is enabled. Clicking and confirming the dialog → device saves NVS
+      and cuts battery immediately. If on battery: device powers off. If on USB:
+      device stays alive, battery output is cut.
 
 ---
 
