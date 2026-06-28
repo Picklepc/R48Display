@@ -1,3 +1,43 @@
+# R48Display v0.2.3 — Release Notes
+
+## What's New in 0.2.3
+
+### Battery Power-Off (Manual Control)
+- **Cut Battery Power** button added to Settings → Power Management (visible when Internal Battery is enabled)
+- Saves all NVS data, then pulses GPIO 7 (PMU KEY pin) LOW for 250 ms to immediately toggle the battery off — device shuts down if on battery power, stays alive on USB with battery output cut
+
+### Shutdown Fix — GPIO 7 KEY Pin
+- Previous shutdown used GPIO 6 (HOLD pin), which only enables the PMU auto-shutoff when load drops below the minimum threshold; the ESP32 running WiFi and BLE never drops that low, so shutdown never triggered
+- All shutdown paths now call `triggerBatteryOff()`, which drops HOLD (GPIO 6) and pulses KEY (GPIO 7) for an immediate PMU toggle
+
+### USB Removal Detection
+- `usbSofDetected` (SOF-only, strict) added to `BatterySample` and tracked separately from `usbCdcConnected` (broad inference)
+- Shutdown uses two independent paths: SOF-gone (fires immediately when a USB host is removed) and inference-gone (fires when battery % drops below 80 % after being above it — slower fallback for DCP charger ports)
+
+### NVS Persistence Fixes
+- `loadDegradation()`, `saveDegradation()`, `loadMaintenance()`, `saveMaintenance()` were silently failing — each function called NVS get/put without a `prefs.begin()`, so the calls ran against a closed handle and returned defaults or wrote nothing
+- `saveSettings()` is now called at the end of `setup()` after `loadSettings()` to seed any keys that don't exist yet (title, hoursBaseline, boardBatteryLowPct, and other fields added in recent releases), ensuring they persist across the next reboot even before the user visits the settings form
+
+### Web — Power Management Restructure
+- "Internal Battery" toggle controls the collapsible sub-options section; sub-options are hidden when battery is disabled
+- Label updated from "Power Save" → "Enable Internal Battery" to reflect actual function
+- Dashboard Device card "Power Save" label updated to "Batt Backup"
+
+### Web — Mic RMS Dashboard
+- Mic RMS value now appears on the Device card above Heap Free
+- Shows live RMS when mic feature is enabled; shows "disabled" otherwise
+
+### Hour Meter Fixes
+- Working hours abbreviation corrected to "h wrk" on LVGL battery page
+- Install hours (baseline) can now be updated without zeroing the counted portion — the form no longer incorrectly calls `setHoursTotal` when the baseline field changes
+- Hours (active, working, baseline) now correctly persist across OTA updates via the NVS fix above
+
+### Power Management — Configurable Battery Threshold
+- New **Low Battery Threshold (%)** setting in Power Management — when the onboard LiPo drops below this level, low-power mode activates and hour counting pauses
+- On startup from a depleted state, hours don't accumulate until the battery rises above the threshold (indicating a charging/powered state)
+
+---
+
 # R48Display v0.2.2 — Release Notes
 
 ## What's New in 0.2.2
