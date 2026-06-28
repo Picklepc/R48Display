@@ -3790,9 +3790,14 @@ void loop() {
   if (now - lastBatteryMs >= BATTERY_REFRESH_MS) {
     lastBatteryMs = now;
     updateScreenBattery();
-    // Shutdown when USB removed and power save is off (device not meant to run on battery)
+    // Shutdown when USB removed and power save is off.
+    // usbEverSeen ensures shutdown only triggers on a transition (was present → now gone),
+    // not on the ambiguous state right after a PMU-restart where SOF and battery inference
+    // haven't settled yet — prevents a re-shutdown boot loop on USB reconnect.
+    static bool usbEverSeen = false;
     static uint32_t usbGoneMs = 0;
-    if (screenBattery.present && !screenBattery.usbCdcConnected) {
+    if (screenBattery.usbCdcConnected) usbEverSeen = true;
+    if (screenBattery.present && !screenBattery.usbCdcConnected && usbEverSeen) {
       if (usbGoneMs == 0) usbGoneMs = now;
       else if (!settings.powerSaveEnabled && now - usbGoneMs > 8000UL) {
         saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
