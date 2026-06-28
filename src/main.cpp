@@ -2946,15 +2946,11 @@ void drawDisplay(bool fullRedraw) {
   s.mqttStatus = settings.mqttEnabled ? String("MQTT ") + mqttClient.statusLabel() : String("");
   s.maintOverdue = maintOverdueCount();
   s.touchReady = touchReady;
-  s.hoursStr = String(hoursActive, 1) + "h act  " + String(hoursWorking, 1) + "h work";
+  s.hoursActStr = String(hoursActive, 1) + "h act";
+  s.hoursWorkStr = String(hoursWorking, 1) + "h work";
   s.use24h = settings.timeFormat == "24h";
   s.powerSaveEnabled = settings.powerSaveEnabled;
   s.apPassword = settings.apPassword;
-  {
-    const R48Mic::Snapshot m = R48Mic::snapshot();
-    s.micEnabled = m.enabled && m.ready;
-    s.micRms = m.rms;
-  }
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;
@@ -3434,6 +3430,7 @@ void apiSettingsPost() {
   if (server.hasArg("runtime_hours")) setHoursTotal(server.arg("runtime_hours").toFloat());
   if (server.hasArg("hours_active")) hoursActive = max(0.0f, server.arg("hours_active").toFloat());
   if (server.hasArg("hours_working")) hoursWorking = max(0.0f, server.arg("hours_working").toFloat());
+  if (server.hasArg("hours_active") || server.hasArg("hours_working") || server.hasArg("hours_baseline")) saveHours();
   if (!validUsageCategory(settings.usageCategory)) settings.usageCategory = USAGE_CATEGORIES[0].id;
   if (oldUsage != settings.usageCategory) {
     if (!server.hasArg("theme_id")) settings.themeId = activeUsage().defaultThemeId;
@@ -3450,7 +3447,7 @@ void apiSettingsPost() {
   if (settings.apPassword.length() < 8) settings.apPassword = "r48display";
   if (settings.otaPassword.length() < 8) settings.otaPassword = "r48display";
   saveSettings();
-  R48Mic::configure(settings.featureMic && activeUsage().audioAssist, settings.micRunThreshold);
+  R48Mic::configure(settings.featureMic, settings.micRunThreshold);
   if (oldRotation != settings.displayRotation && displayReady) {
     applyDisplayRotation();
     gfx->fillScreen(COLOR_BG);
@@ -3736,7 +3733,7 @@ void setup() {
   analogReadResolution(12);
   analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
   updateScreenBattery();
-  R48Mic::begin(settings.featureMic && activeUsage().audioAssist, settings.micRunThreshold);
+  R48Mic::begin(settings.featureMic, settings.micRunThreshold);
   bleBms.begin();
   setupWiFi(setupButtonHeld);
   if (WiFi.status() == WL_CONNECTED) configureClock();
@@ -3774,10 +3771,22 @@ void loop() {
   if (now - lastBatteryMs >= BATTERY_REFRESH_MS) {
     lastBatteryMs = now;
     updateScreenBattery();
+    // Shutdown when USB removed and power save is off (device not meant to run on battery)
+    static uint32_t usbGoneMs = 0;
+    if (screenBattery.present && !screenBattery.usbCdcConnected) {
+      if (usbGoneMs == 0) usbGoneMs = now;
+      else if (!settings.powerSaveEnabled && now - usbGoneMs > 8000UL) {
+        saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
+        delay(80);
+        digitalWrite(PIN_BATTERY_HOLD, LOW);
+      }
+    } else {
+      usbGoneMs = 0;
+    }
     // Graceful shutdown on critically low board battery
     if (screenBattery.present && !screenBattery.usbCdcConnected &&
         screenBattery.percent <= 4 && screenBattery.volts < 3.4f) {
-      saveSettings(); saveMaintenance(); saveDegradation();
+      saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
       delay(80);
       digitalWrite(PIN_BATTERY_HOLD, LOW);
     }

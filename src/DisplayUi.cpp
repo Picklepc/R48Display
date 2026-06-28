@@ -295,9 +295,8 @@ void buildDashboard() {
   // Row 2: HOURS left, LOAD right
   metric(5, "HOURS", 58, 287, 88, &lv_font_montserrat_18);
   metric(3, "LOAD", 214, 287, 88, &lv_font_montserrat_18);
-  // Row 3: WATTS left, MIC right
-  metric(6, "WATTS", 58, 323, 88, &lv_font_montserrat_16);
-  metric(7, "MIC", 214, 323, 88, &lv_font_montserrat_16);
+  // Row 3: combined power watts, centered
+  metric(6, "WATTS", 104, 323, 152, &lv_font_montserrat_16);
 }
 
 void buildPower() {
@@ -306,11 +305,12 @@ void buildPower() {
   w.metric[1] = label(w.root, "--", 84, 157, 192, &lv_font_montserrat_20, COL_MUTED, LV_TEXT_ALIGN_CENTER);
   // Row 1: SPREAD centered, wider
   metric(3, "SPREAD", 96, 221, 168, &lv_font_montserrat_18);
-  // Row 2: CELLS/TEMP moved inward and down (CAPACITY removed)
-  metric(2, "CELLS", 89, 279, 82, &lv_font_montserrat_18);
-  metric(4, "TEMP", 189, 279, 82, &lv_font_montserrat_18);
-  // Row 3: HOURS
-  metric(6, "HOURS", 88, 324, 184, &lv_font_montserrat_14);
+  // Row 2: CELLS/TEMP wide, matching dashboard HOURS/LOAD positions
+  metric(2, "CELLS", 58, 279, 88, &lv_font_montserrat_18);
+  metric(4, "TEMP", 214, 279, 88, &lv_font_montserrat_18);
+  // HOURS heading at value-row level (y:293), act and work below
+  metric(5, "HOURS", 96, 293, 168, &lv_font_montserrat_14);
+  w.metric[6] = label(w.root, "--", 96, 322, 168, &lv_font_montserrat_14, COL_TEXT, LV_TEXT_ALIGN_CENTER);
 }
 
 void buildClock() {
@@ -447,7 +447,6 @@ void updateDashboard(const Snapshot &s) {
   const float activeWatts = charging ? s.chargeWatts : s.dischargeWatts;
   setText(w.metric[6], activeWatts > 1.0f ? wattsText(activeWatts) : "--");
   setTextColor(w.metric[6], charging ? COL_ACCENT : COL_TEXT);
-  setText(w.metric[7], s.micEnabled ? String(s.micRms) : "--");
 }
 
 void updatePower(const Snapshot &s) {
@@ -459,7 +458,8 @@ void updatePower(const Snapshot &s) {
   setText(w.metric[2], s.cellCount ? String(s.cellCount) : "--");
   setText(w.metric[3], s.deltaCellMv > 0.0f ? String(s.deltaCellMv, 0) + "mV" : "--");
   setText(w.metric[4], s.temp);
-  setText(w.metric[6], s.hoursStr);
+  setText(w.metric[5], s.hoursActStr);
+  setText(w.metric[6], s.hoursWorkStr);
 }
 
 void updateStatus(const Snapshot &s) {

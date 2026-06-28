@@ -237,7 +237,7 @@ String settingsBody() {
       "<label class='check'><input name='activity_detection' type='checkbox'> Activity mode detection</label>"
       "<label class='check'><input name='work_detection' type='checkbox'> Work / surge detection</label>"
       "<label class='check'><input name='feature_mic' type='checkbox'> Audio validation — when enabled, Working state requires both amps AND mic noise above threshold</label>"
-      "<label>Mic Threshold (RMS)<input name='mic_run_threshold' type='number' min='100' max='12000' step='50'><span class='hint'>Tune using the MIC reading on the LVGL dashboard while mowing</span></label>"
+      "<label>Mic Threshold (RMS)<input name='mic_run_threshold' type='number' min='100' max='12000' step='50'><span class='hint'>Watch the RMS value in the web dashboard Audio Assist line while mowing to find your threshold</span></label>"
       "</div>"
       "</div>"
 
