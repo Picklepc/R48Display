@@ -60,7 +60,7 @@ String dashboardBody() {
       "<div class='dash-strip'>"
       "<div class='metric'><div class='label'>Board Battery</div><div class='value sm' id='sys-bat'>--</div></div>"
       "<div class='metric'><div class='label'>Power Source</div><div class='value sm' id='sys-pwr'>--</div></div>"
-      "<div class='metric'><div class='label'>Power Save</div><div class='value sm' id='sys-save'>--</div></div>"
+      "<div class='metric'><div class='label'>Batt Backup</div><div class='value sm' id='sys-save'>--</div></div>"
       "<div class='metric'><div class='label'>Mic RMS</div><div class='value sm' id='sys-mic-rms'>--</div></div>"
       "<div class='metric'><div class='label'>Heap Free</div><div class='value sm' id='sys-heap'>--</div></div>"
       "<div class='metric'><div class='label'>MQTT</div><div class='value sm' id='sys-mqtt'>--</div></div>"
@@ -274,14 +274,18 @@ String settingsBody() {
       "<div class='settings-group'>"
       "<h3>Power Management</h3>"
       "<div class='form-grid'>"
+      "<label class='check'><input name='power_save_enabled' type='checkbox' id='battEnCb' onchange='toggleBattOptions(this.checked)'> Enable Internal Battery"
+      "<span class='note'>When enabled, the onboard LiPo provides backup power when USB is removed and activates the power-saving options below. When disabled, the device shuts down when USB power is removed and the options below have no effect.</span></label>"
+      "</div>"
+      "<div id='batt-options'>"
+      "<div class='form-grid'>"
       "<label>LCD Timeout (seconds)<input name='lcd_timeout_sec' type='number' min='0' max='3600' step='5'></label>"
       "<label>Idle BLE Wake Hours<input name='idle_ble_wake_hours' type='number' min='0.25' max='24' step='0.25'></label>"
       "<label>Low Voltage Floor (V/cell)<input name='low_voltage_floor_v' type='number' min='2.0' max='3.8' step='0.01'></label>"
-      "<label>Board Battery Low Threshold (%)"
-      "<span class='hint'>Force low power mode and pause hour counting when the onboard LiPo drops below this level. On startup from a depleted state, hours won't count until the battery rises above this threshold.</span>"
+      "<label>Low Battery Threshold (%)"
+      "<span class='hint'>When the onboard LiPo drops below this level, low power mode activates and hour counting pauses. On startup from a depleted state, hours don't count until the battery rises above this threshold.</span>"
       "<input name='board_battery_low_pct' type='number' min='5' max='80' step='5'></label>"
-      "<label class='check'><input name='power_save_enabled' type='checkbox'> Enable Power Save Mode"
-      "<span class='note'>Reduces screen timeout, BLE polling speed, and CPU frequency.</span></label>"
+      "</div>"
       "</div>"
       "</div>"
 
@@ -499,7 +503,7 @@ function renderDetails(data) {
     ['Hours: counted', `${get(data, 'hours.counted')} h`],
     ['Hours: active', `${get(data, 'hours.active')} h`],
     ['Hours: working', `${get(data, 'hours.working')} h`],
-    ['Power source', `${get(data, 'screen_battery.power_source')} / save:${get(data, 'screen_battery.power_save_enabled')}`],
+    ['Power source', `${get(data, 'screen_battery.power_source')} / batt:${get(data, 'screen_battery.power_save_enabled') ? 'on' : 'off'}`],
     ['BLE policy', `${get(data, 'bms.policy')} (${get(data, 'bms.soc_rate_pct_per_hour')}%/h)`],
     ['NTP', get(data, 'clock.ntp_configured') ? `sync via ${get(data, 'clock.ntp_server')}` : 'disabled'],
     ['Touch', get(data, 'hardware.touch_ready')],
@@ -664,6 +668,8 @@ async function loadSettings() {
     if (el.type === 'checkbox') el.checked = !!data[key];
     else if (data[key] !== undefined) el.value = data[key];
   });
+  const battCb = document.getElementById('battEnCb');
+  if (battCb) toggleBattOptions(battCb.checked);
   updateThemeDescription();
 }
 
@@ -703,6 +709,10 @@ async function scanBle() {
   }).join('');
 }
 
+function toggleBattOptions(on) {
+  const el = document.getElementById('batt-options');
+  if (el) el.style.display = on ? '' : 'none';
+}
 function toggleMqtt(on) {
   const rows = ['mqttHostRow','mqttPortRow','mqttUserRow','mqttPassRow','mqttPfxRow'];
   rows.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; });
@@ -782,6 +792,8 @@ wireActions();
 loadSettings().then(() => {
   const mqttCb = document.getElementById('mqttEnCb');
   if (mqttCb) toggleMqtt(mqttCb.checked);
+  const battCb = document.getElementById('battEnCb');
+  if (battCb) toggleBattOptions(battCb.checked);
 });
 refresh();
 setInterval(refresh, 2500);

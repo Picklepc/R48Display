@@ -360,7 +360,7 @@ void buildStatus() {
   metric(2, "BLE", 35, 120, 290, &lv_font_montserrat_18);
   metric(3, "BMS", 35, 166, 290, &lv_font_montserrat_14);
   metric(4, "BOARD", 35, 211, 135, &lv_font_montserrat_16);
-  metric(5, "SAVE", 190, 211, 135, &lv_font_montserrat_16);
+  metric(5, "BATT", 190, 211, 135, &lv_font_montserrat_16);
   metric(6, "FW", 35, 263, 135, &lv_font_montserrat_16);
   metric(7, "UPTIME", 190, 263, 135, &lv_font_montserrat_16);
   w.metric[8] = label(w.root, "--", 24, 324, 312, &lv_font_montserrat_12, COL_WARN, LV_TEXT_ALIGN_CENTER);

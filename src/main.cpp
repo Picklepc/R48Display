@@ -2404,12 +2404,10 @@ void initBatteryPowerHold() {
 }
 
 void applyBatteryHold() {
-  // Power save ON  → hold HIGH: battery stays enabled when USB is removed.
-  // Power save OFF → hold LOW:  no battery backup; USB removal causes instant
-  //                              hardware power-off via the PMU, no software
-  //                              detection required. PMU restarts automatically
-  //                              when USB VBUS is reconnected.
-  digitalWrite(PIN_BATTERY_HOLD, settings.powerSaveEnabled ? HIGH : LOW);
+  // PMU KEY pin needs to stay HIGH to keep battery output active.
+  // LOW is a momentary trigger to cut power, not a sustained disable.
+  // Always assert HIGH; software handles USB-removal shutdown when battery is off.
+  digitalWrite(PIN_BATTERY_HOLD, HIGH);
 }
 
 void calibrateButtonIdle(ButtonTracker &button) {
@@ -3805,10 +3803,22 @@ void loop() {
   if (now - lastBatteryMs >= BATTERY_REFRESH_MS) {
     lastBatteryMs = now;
     updateScreenBattery();
-    // USB removal shutdown is hardware-managed via applyBatteryHold():
-    // power save OFF → GPIO 6 LOW → PMU cuts power the instant USB VBUS disappears.
-    // No software detection needed for that path.
-
+    // Shutdown when USB removed and internal battery is disabled.
+    // usbEverSeen prevents spurious shutdown on boot before USB detection settles,
+    // which would cause a re-shutdown boot loop on USB reconnect.
+    static bool usbEverSeen = false;
+    static uint32_t usbGoneMs = 0;
+    if (screenBattery.usbCdcConnected) usbEverSeen = true;
+    if (screenBattery.present && !screenBattery.usbCdcConnected && usbEverSeen) {
+      if (usbGoneMs == 0) usbGoneMs = now;
+      else if (!settings.powerSaveEnabled && now - usbGoneMs > 8000UL) {
+        saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
+        delay(80);
+        digitalWrite(PIN_BATTERY_HOLD, LOW);
+      }
+    } else {
+      usbGoneMs = 0;
+    }
     // Graceful shutdown on critically low board battery
     if (screenBattery.present && !screenBattery.usbCdcConnected &&
         screenBattery.percent <= 4 && screenBattery.volts < 3.4f) {
