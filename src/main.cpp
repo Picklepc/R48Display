@@ -223,6 +223,7 @@ struct AppSettings {
   bool powerSaveEnabled = false;
   float idleBleWakeHours = 6.0f;
   float lowVoltageFloorV = 3.0f;
+  uint8_t boardBatteryLowPct = 20;
   // MQTT
   bool mqttEnabled = false;
   String mqttHost;
@@ -596,7 +597,8 @@ const char *blePolicyName(BlePolicyMode mode) {
 }
 
 bool batteryPowerSaveActive() {
-  return settings.powerSaveEnabled;
+  if (settings.powerSaveEnabled) return true;
+  return screenBattery.present && screenBattery.percent < settings.boardBatteryLowPct;
 }
 
 uint32_t displaySleepTimeoutMs() {
@@ -2188,6 +2190,7 @@ void loadSettings() {
   settings.powerSaveEnabled = prefs.getBool("pwrSave", settings.powerSaveEnabled);
   settings.idleBleWakeHours = prefs.getFloat("idleBleH", settings.idleBleWakeHours);
   settings.lowVoltageFloorV = prefs.getFloat("lvFloorV", settings.lowVoltageFloorV);
+  settings.boardBatteryLowPct = prefs.getUChar("bbLowPct", settings.boardBatteryLowPct);
   settings.mqttEnabled = prefs.getBool("mqttEn", settings.mqttEnabled);
   settings.mqttHost = prefs.getString("mqttHost", settings.mqttHost);
   settings.mqttPort = static_cast<uint16_t>(prefs.getUInt("mqttPort", settings.mqttPort));
@@ -2280,6 +2283,7 @@ void saveSettings() {
   prefs.putBool("pwrSave", settings.powerSaveEnabled);
   prefs.putFloat("idleBleH", settings.idleBleWakeHours);
   prefs.putFloat("lvFloorV", settings.lowVoltageFloorV);
+  prefs.putUChar("bbLowPct", settings.boardBatteryLowPct);
   prefs.putBool("mqttEn", settings.mqttEnabled);
   prefs.putString("mqttHost", settings.mqttHost);
   prefs.putUInt("mqttPort", settings.mqttPort);
@@ -2679,7 +2683,8 @@ void updateHours() {
   }
   const float deltaH = (now - lastHoursTickMs) / 3600000.0f;
   lastHoursTickMs = now;
-  if (bms.lastAnalogMs > 0 && powerSource != PowerSource::Battery) {
+  const bool boardBatteryOk = !screenBattery.present || screenBattery.percent >= settings.boardBatteryLowPct;
+  if (bms.lastAnalogMs > 0 && boardBatteryOk) {
     hoursTotal += deltaH;
     const ActivityState state = activityState();
     switch (state) {
@@ -3360,6 +3365,7 @@ void apiSettingsGet() {
   doc["power_save_enabled"] = settings.powerSaveEnabled;
   doc["idle_ble_wake_hours"] = serialized(String(settings.idleBleWakeHours, 2));
   doc["low_voltage_floor_v"] = serialized(String(settings.lowVoltageFloorV, 2));
+  doc["board_battery_low_pct"] = settings.boardBatteryLowPct;
   doc["mqtt_enabled"] = settings.mqttEnabled;
   doc["mqtt_host"] = settings.mqttHost;
   doc["mqtt_port"] = settings.mqttPort;
@@ -3412,6 +3418,7 @@ void apiSettingsPost() {
   if (server.hasArg("power_save_enabled")) settings.powerSaveEnabled = server.arg("power_save_enabled") == "1" || server.arg("power_save_enabled") == "true" || server.arg("power_save_enabled") == "on";
   if (server.hasArg("idle_ble_wake_hours")) settings.idleBleWakeHours = constrain(server.arg("idle_ble_wake_hours").toFloat(), 0.25f, 24.0f);
   if (server.hasArg("low_voltage_floor_v")) settings.lowVoltageFloorV = constrain(server.arg("low_voltage_floor_v").toFloat(), 2.0f, 3.8f);
+  if (server.hasArg("board_battery_low_pct")) settings.boardBatteryLowPct = (uint8_t)constrain(server.arg("board_battery_low_pct").toInt(), 5, 80);
   if (server.hasArg("mqtt_enabled")) settings.mqttEnabled = server.arg("mqtt_enabled") == "1" || server.arg("mqtt_enabled") == "on" || server.arg("mqtt_enabled") == "true";
   if (server.hasArg("mqtt_host")) settings.mqttHost = server.arg("mqtt_host");
   if (server.hasArg("mqtt_port")) settings.mqttPort = static_cast<uint16_t>(constrain(server.arg("mqtt_port").toInt(), 1, 65535));
@@ -3429,12 +3436,20 @@ void apiSettingsPost() {
   if (server.hasArg("ntp_server")) settings.ntpServer = server.arg("ntp_server");
   if (server.hasArg("time_format")) settings.timeFormat = server.arg("time_format") == "24h" ? "24h" : "12h";
   if (server.hasArg("temp_unit")) { const String u = server.arg("temp_unit"); settings.tempUnit = (u == "C") ? "C" : "F"; }
-  if (server.hasArg("hours_baseline")) settings.hoursBaseline = max(0.0f, server.arg("hours_baseline").toFloat());
-  if (server.hasArg("hours_total")) setHoursTotal(server.arg("hours_total").toFloat());
-  if (server.hasArg("runtime_hours")) setHoursTotal(server.arg("runtime_hours").toFloat());
-  if (server.hasArg("hours_active")) hoursActive = max(0.0f, server.arg("hours_active").toFloat());
-  if (server.hasArg("hours_working")) hoursWorking = max(0.0f, server.arg("hours_working").toFloat());
-  if (server.hasArg("hours_active") || server.hasArg("hours_working") || server.hasArg("hours_baseline")) saveHours();
+  // Changing baseline adjusts the displayed total without touching counted hours.
+  // Skipping setHoursTotal when baseline changes avoids hours_total (= old_baseline + counted)
+  // being misinterpreted as the new total and zeroing the counted portion.
+  const bool baselineChanged = server.hasArg("hours_baseline") && server.arg("hours_baseline").length() > 0;
+  if (baselineChanged) settings.hoursBaseline = max(0.0f, server.arg("hours_baseline").toFloat());
+  if (!baselineChanged) {
+    if (server.hasArg("hours_total")) setHoursTotal(server.arg("hours_total").toFloat());
+    if (server.hasArg("runtime_hours")) setHoursTotal(server.arg("runtime_hours").toFloat());
+  }
+  if (server.hasArg("hours_active") && server.arg("hours_active").length() > 0)
+    hoursActive = max(0.0f, server.arg("hours_active").toFloat());
+  if (server.hasArg("hours_working") && server.arg("hours_working").length() > 0)
+    hoursWorking = max(0.0f, server.arg("hours_working").toFloat());
+  if (baselineChanged || server.hasArg("hours_active") || server.hasArg("hours_working")) saveHours();
   if (!validUsageCategory(settings.usageCategory)) settings.usageCategory = USAGE_CATEGORIES[0].id;
   if (oldUsage != settings.usageCategory) {
     if (!server.hasArg("theme_id")) settings.themeId = activeUsage().defaultThemeId;

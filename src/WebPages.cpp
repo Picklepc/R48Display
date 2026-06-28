@@ -277,8 +277,11 @@ String settingsBody() {
       "<label>LCD Timeout (seconds)<input name='lcd_timeout_sec' type='number' min='0' max='3600' step='5'></label>"
       "<label>Idle BLE Wake Hours<input name='idle_ble_wake_hours' type='number' min='0.25' max='24' step='0.25'></label>"
       "<label>Low Voltage Floor (V/cell)<input name='low_voltage_floor_v' type='number' min='2.0' max='3.8' step='0.01'></label>"
+      "<label>Board Battery Low Threshold (%)"
+      "<span class='hint'>Force low power mode and pause hour counting when the onboard LiPo drops below this level. On startup from a depleted state, hours won't count until the battery rises above this threshold.</span>"
+      "<input name='board_battery_low_pct' type='number' min='5' max='80' step='5'></label>"
       "<label class='check'><input name='power_save_enabled' type='checkbox'> Enable Power Save Mode"
-      "<span class='note'>Reduces screen timeout, BLE polling speed, and CPU frequency. Toggle with long press on display.</span></label>"
+      "<span class='note'>Reduces screen timeout, BLE polling speed, and CPU frequency.</span></label>"
       "</div>"
       "</div>"
 
