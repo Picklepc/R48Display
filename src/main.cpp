@@ -2413,10 +2413,23 @@ void initBatteryPowerHold() {
 }
 
 void applyBatteryHold() {
-  // PMU KEY pin needs to stay HIGH to keep battery output active.
-  // LOW is a momentary trigger to cut power, not a sustained disable.
-  // Always assert HIGH; software handles USB-removal shutdown when battery is off.
   digitalWrite(PIN_BATTERY_HOLD, HIGH);
+}
+
+void triggerBatteryOff() {
+  // Simulate a PMU KEY-button press to toggle battery output off.
+  // GPIO 6 (HOLD) going LOW removes the "keep alive" signal, but the PMU
+  // only auto-shutoffs when load drops below its minimum — the ESP32 running
+  // at full tilt never gets there.  GPIO 7 (KEY) is the actual toggle button:
+  // driving it LOW for ~250 ms tells the PMU to cut output immediately.
+  digitalWrite(PIN_BATTERY_HOLD, LOW);
+  pinMode(PIN_BATTERY_KEY, OUTPUT);
+  digitalWrite(PIN_BATTERY_KEY, LOW);
+  delay(250);
+  // Device will likely lose power here if running on battery.
+  // Clean up in case USB is keeping us alive after the battery cut.
+  digitalWrite(PIN_BATTERY_KEY, HIGH);
+  pinMode(PIN_BATTERY_KEY, INPUT_PULLUP);
 }
 
 void calibrateButtonIdle(ButtonTracker &button) {
@@ -3043,7 +3056,7 @@ String themeCss() {
   css += F("--font:system-ui,-apple-system,Segoe UI,sans-serif}"
            "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh}header{position:sticky;top:0;z-index:3;background:var(--bg);border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;justify-content:space-between;padding:12px 16px}"
            "h1,h2,h3,p{margin:0}h1{font-size:20px;color:var(--primary)}header p{color:var(--muted);font-size:12px;margin-top:2px}.brand{display:flex;gap:10px;align-items:center}.mark{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--primary),var(--accent));display:block}"
-           "nav{display:flex;gap:8px;flex-wrap:wrap}a,button,input,select{font:inherit}nav a,button{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:8px 11px;text-decoration:none;cursor:pointer}button.primary{background:var(--primary);border-color:var(--primary);color:var(--buttonText);font-weight:800}"
+           "nav{display:flex;gap:8px;flex-wrap:wrap}a,button,input,select{font:inherit}nav a,button{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:8px 11px;text-decoration:none;cursor:pointer}button.primary{background:var(--primary);border-color:var(--primary);color:var(--buttonText);font-weight:800}button.btn-danger{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:700}"
            ".wrap{max-width:1180px;margin:0 auto;padding:18px;display:grid;gap:16px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.grid,.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.wide{grid-column:1/-1}.card,.metric,.gauge-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.metric{min-height:104px}.label{color:var(--muted);font-size:13px}.value{font-size:30px;margin-top:6px}.value.sm{font-size:20px;line-height:1.3}.subline{color:var(--muted);text-align:center;margin-top:12px}"
            ".gauge-card{display:grid;place-items:center}.gauge{width:min(60vw,230px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;position:relative;background:conic-gradient(from 135deg,var(--primary) calc(var(--pct)*0.75%),var(--line) 0 75%,transparent 75%)}.gauge:before{content:'';position:absolute;inset:22px;border-radius:50%;background:var(--panel)}.gauge b{position:relative;font-size:42px;font-weight:700;color:var(--primary)}"
            ".section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}label{display:grid;gap:6px;color:var(--muted);font-size:13px}label.check{display:flex;align-items:center;gap:8px;color:var(--text)}label.check input{width:auto}.hint{color:var(--muted);font-size:12px;line-height:1.35}input,select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}"
@@ -3662,6 +3675,18 @@ void apiReboot() {
   ESP.restart();
 }
 
+void apiBatteryOff() {
+  if (!screenBattery.present) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"No internal battery detected\"}");
+    return;
+  }
+  server.sendHeader("Connection", "close");
+  server.send(200, "application/json", "{\"ok\":true,\"note\":\"Cutting battery power\"}");
+  delay(300);
+  saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
+  triggerBatteryOff();
+}
+
 void handleUpdateGet() {
   String html = commonHead("Firmware Update");
   html += R48Web::updateBody();
@@ -3716,6 +3741,7 @@ void setupRoutes() {
   server.on("/api/display/next", HTTP_POST, apiDisplayNext);
   server.on("/api/display/page", HTTP_POST, apiDisplayPage);
   server.on("/api/reboot", HTTP_POST, apiReboot);
+  server.on("/api/battery/off", HTTP_POST, apiBatteryOff);
   server.on("/api/maintenance", HTTP_GET, apiMaintenanceGet);
   server.on("/api/maintenance", HTTP_POST, apiMaintenancePost);
   server.on("/api/maintenance/confirm", HTTP_POST, apiMaintenanceConfirm);
@@ -3835,8 +3861,7 @@ void loop() {
       if (shutdownGoneMs == 0) shutdownGoneMs = now;
       else if (!settings.powerSaveEnabled && now - shutdownGoneMs > 8000UL) {
         saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
-        delay(80);
-        digitalWrite(PIN_BATTERY_HOLD, LOW);
+        triggerBatteryOff();
       }
     } else {
       shutdownGoneMs = 0;
@@ -3845,8 +3870,7 @@ void loop() {
     if (screenBattery.present && !screenBattery.usbCdcConnected &&
         screenBattery.percent <= 4 && screenBattery.volts < 3.4f) {
       saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
-      delay(80);
-      digitalWrite(PIN_BATTERY_HOLD, LOW);
+      triggerBatteryOff();
     }
   }
   if (now - lastDisplayMs >= displayRefreshIntervalMs()) {

@@ -286,6 +286,11 @@ String settingsBody() {
       "<span class='hint'>When the onboard LiPo drops below this level, low power mode activates and hour counting pauses. On startup from a depleted state, hours don't count until the battery rises above this threshold.</span>"
       "<input name='board_battery_low_pct' type='number' min='5' max='80' step='5'></label>"
       "</div>"
+      "<div class='form-grid' style='margin-top:0.5rem'>"
+      "<div><button type='button' id='battOffBtn' class='btn-danger' onclick='batteryOff()'>Cut Battery Power</button>"
+      "<span class='hint' style='margin-top:0.25rem;display:block'>Immediately saves all data and toggles the battery off via the PMU key pin. Use this to shut the device down when USB power is removed. The device will restart when USB is reconnected.</span>"
+      "</div>"
+      "</div>"
       "</div>"
       "</div>"
 
@@ -712,6 +717,15 @@ async function scanBle() {
 function toggleBattOptions(on) {
   const el = document.getElementById('batt-options');
   if (el) el.style.display = on ? '' : 'none';
+}
+async function batteryOff() {
+  const btn = document.getElementById('battOffBtn');
+  if (!confirm('This will save all data and immediately cut battery power. The device will turn off if not on USB. Continue?')) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'Cutting power…'; }
+  try {
+    await fetch('/api/battery/off', {method:'POST'});
+  } catch(e) {}
+  if (btn) btn.textContent = 'Done — device may be off';
 }
 function toggleMqtt(on) {
   const rows = ['mqttHostRow','mqttPortRow','mqttUserRow','mqttPassRow','mqttPfxRow'];
