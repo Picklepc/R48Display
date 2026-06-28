@@ -2500,10 +2500,14 @@ void updateScreenBattery() {
     screenBatteryRiseSamples = 0;
   }
 
-  bool usbPowerPresent = static_cast<bool>(Serial);
+  // USB host connection (SOF-based, works for computer; not power adapters)
+  bool usbPowerPresent = false;
 #if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
   usbPowerPresent = HWCDC::isPlugged();
 #endif
+  // Inference: board battery ≥80% strongly suggests external/charger power
+  if (!usbPowerPresent && screenBattery.present && screenBattery.percent >= 80)
+    usbPowerPresent = true;
   if (usbPowerPresent || !screenBattery.present ||
       screenBattery.volts >= BATTERY_EXTERNAL_HIGH_V ||
       screenBattery.deltaMv >= BATTERY_EXTERNAL_FAST_RISE_MV ||
@@ -2947,7 +2951,7 @@ void drawDisplay(bool fullRedraw) {
   s.maintOverdue = maintOverdueCount();
   s.touchReady = touchReady;
   s.hoursActStr = String(hoursActive, 1) + "h act";
-  s.hoursWorkStr = String(hoursWorking, 1) + "h work";
+  s.hoursWorkStr = String(hoursWorking, 1) + "h wrk";
   s.use24h = settings.timeFormat == "24h";
   s.powerSaveEnabled = settings.powerSaveEnabled;
   s.apPassword = settings.apPassword;

@@ -61,6 +61,7 @@ String dashboardBody() {
       "<div class='metric'><div class='label'>Board Battery</div><div class='value sm' id='sys-bat'>--</div></div>"
       "<div class='metric'><div class='label'>Power Source</div><div class='value sm' id='sys-pwr'>--</div></div>"
       "<div class='metric'><div class='label'>Power Save</div><div class='value sm' id='sys-save'>--</div></div>"
+      "<div class='metric'><div class='label'>Mic RMS</div><div class='value sm' id='sys-mic-rms'>--</div></div>"
       "<div class='metric'><div class='label'>Heap Free</div><div class='value sm' id='sys-heap'>--</div></div>"
       "<div class='metric'><div class='label'>MQTT</div><div class='value sm' id='sys-mqtt'>--</div></div>"
       "<div class='metric'><div class='label'>BLE Policy</div><div class='value sm' id='sys-ble-pol'>--</div></div>"
@@ -606,6 +607,7 @@ function render(data) {
   text('sys-bat', get(data, 'screen_battery.label') || '--');
   text('sys-pwr', get(data, 'screen_battery.power_source') || '--');
   text('sys-save', get(data, 'screen_battery.power_save_enabled') ? 'on' : 'off');
+  { const rms = get(data, 'mic.rms'); const en = get(data, 'mic.enabled'); text('sys-mic-rms', en ? String(rms) : 'disabled'); }
   text('sys-heap', (() => { const h = Number(get(data, 'hardware.free_heap', 0)); return h > 0 ? `${Math.round(h / 1024)} KB` : '--'; })());
   text('sys-mqtt', get(data, 'mqtt.status') || (get(data, 'mqtt.enabled') ? 'enabled' : 'disabled'));
   text('sys-ble-pol', `${get(data, 'bms.policy') || '--'}`);
