@@ -232,6 +232,7 @@ struct AppSettings {
   String mqttTopicPrefix;
   bool featureMic = false;
   float micRunThreshold = 900.0f;
+  String workTrigger = "amps"; // "amps", "mic", "either"
   float hoursBaseline = 0.0f;
   // User-defined state labels (populated from category defaults on first use)
   String labelCharging;
@@ -774,9 +775,11 @@ bool activityDetected() {
 
 bool workDetected() {
   if (!settings.workDetection) return false;
-  const UsageCategory &usage = activeUsage();
-  const bool audioAssist = usage.audioAssist && settings.featureMic && activityDetected() && R48Mic::toneDetected();
-  return dischargeCurrentA() >= settings.bladesOnAmps || audioAssist;
+  const bool highAmps = dischargeCurrentA() >= settings.bladesOnAmps;
+  const bool highMic = settings.featureMic && R48Mic::toneDetected();
+  if (settings.workTrigger == "mic") return highMic;
+  if (settings.workTrigger == "either") return highAmps || highMic;
+  return highAmps; // default: "amps"
 }
 
 bool mowerRunning() {
@@ -2196,6 +2199,7 @@ void loadSettings() {
   settings.mqttTopicPrefix = prefs.getString("mqttPfx", settings.mqttTopicPrefix);
   settings.featureMic = prefs.getBool("mic", settings.featureMic);
   settings.micRunThreshold = prefs.getFloat("micTh", settings.micRunThreshold);
+  settings.workTrigger = prefs.getString("workTrig", settings.workTrigger.c_str());
   settings.chargeMinAmps = prefs.getFloat("chgMinA", 0.5f);
   settings.ntpEnabled = prefs.getBool("ntpOn", true);
   settings.ntpServer = prefs.getString("ntpHost", DEFAULT_NTP_SERVER);
@@ -2288,6 +2292,7 @@ void saveSettings() {
   prefs.putString("mqttPfx", settings.mqttTopicPrefix);
   prefs.putBool("mic", settings.featureMic);
   prefs.putFloat("micTh", settings.micRunThreshold);
+  prefs.putString("workTrig", settings.workTrigger);
   prefs.putFloat("chgMinA", settings.chargeMinAmps);
   prefs.putBool("ntpOn", settings.ntpEnabled);
   prefs.putString("ntpHost", settings.ntpServer);
@@ -2762,24 +2767,6 @@ void maybeHandleTouch() {
   if (!displayReady || !touchReady) return;
   const bool intLow = digitalRead(PIN_TOUCH_INT) == LOW;
 
-  // Long-press (800 ms, display awake) → toggle power save
-  static uint32_t holdStartMs = 0;
-  static bool holdFired = false;
-  if (intLow && !displaySleeping) {
-    if (holdStartMs == 0) holdStartMs = millis();
-    if (!holdFired && millis() - holdStartMs >= 800UL) {
-      holdFired = true;
-      lastTouchMs = millis();
-      settings.powerSaveEnabled = !settings.powerSaveEnabled;
-      saveSettings();
-      drawDisplay(true);
-    }
-  } else {
-    holdStartMs = 0;
-    holdFired = false;
-  }
-  if (holdFired) return;
-
   if (millis() - lastTouchMs < 300) return;
   if (!intLow) return;
   TouchPoint p;
@@ -2968,6 +2955,11 @@ void drawDisplay(bool fullRedraw) {
   s.use24h = settings.timeFormat == "24h";
   s.powerSaveEnabled = settings.powerSaveEnabled;
   s.apPassword = settings.apPassword;
+  {
+    const R48Mic::Snapshot m = R48Mic::snapshot();
+    s.micEnabled = m.enabled && m.ready;
+    s.micRms = m.rms;
+  }
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;
@@ -3381,6 +3373,7 @@ void apiSettingsGet() {
   doc["mqtt_topic_prefix"] = settings.mqttTopicPrefix;
   doc["feature_mic"] = settings.featureMic;
   doc["mic_run_threshold"] = serialized(String(settings.micRunThreshold, 0));
+  doc["work_trigger"] = settings.workTrigger;
   doc["hours_baseline"] = serialized(String(settings.hoursBaseline, 2));
   doc["hours_total"] = serialized(String(settings.hoursBaseline + hoursTotal, 2));
   doc["hours_counted"] = serialized(String(hoursTotal, 2));
@@ -3433,6 +3426,10 @@ void apiSettingsPost() {
   if (server.hasArg("mqtt_topic_prefix")) settings.mqttTopicPrefix = server.arg("mqtt_topic_prefix");
   if (server.hasArg("feature_mic")) settings.featureMic = server.arg("feature_mic") == "1";
   if (server.hasArg("mic_run_threshold")) settings.micRunThreshold = constrain(server.arg("mic_run_threshold").toFloat(), 100.0f, 12000.0f);
+  if (server.hasArg("work_trigger")) {
+    const String wt = server.arg("work_trigger");
+    if (wt == "mic" || wt == "either" || wt == "amps") settings.workTrigger = wt;
+  }
   if (server.hasArg("charge_min_amps")) settings.chargeMinAmps = constrain(server.arg("charge_min_amps").toFloat(), 0.1f, 200.0f);
   if (server.hasArg("label_charging") && server.arg("label_charging").length() > 0) settings.labelCharging = server.arg("label_charging");
   if (server.hasArg("label_standby") && server.arg("label_standby").length() > 0) settings.labelStandby = server.arg("label_standby");

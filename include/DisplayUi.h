@@ -57,6 +57,8 @@ struct Snapshot {
   bool use24h = false;
   bool powerSaveEnabled = false;
   String apPassword;
+  uint32_t micRms = 0;
+  bool micEnabled = false;
 
   uint32_t themeBg = 0x050605;
   uint32_t themePanel = 0x10170D;

@@ -295,8 +295,9 @@ void buildDashboard() {
   // Row 2: HOURS left, LOAD right
   metric(5, "HOURS", 58, 287, 88, &lv_font_montserrat_18);
   metric(3, "LOAD", 214, 287, 88, &lv_font_montserrat_18);
-  // Row 3: combined power watts, centered
-  metric(6, "WATTS", 104, 323, 152, &lv_font_montserrat_16);
+  // Row 3: WATTS left, MIC right
+  metric(6, "WATTS", 58, 323, 88, &lv_font_montserrat_16);
+  metric(7, "MIC", 214, 323, 88, &lv_font_montserrat_16);
 }
 
 void buildPower() {
@@ -446,6 +447,7 @@ void updateDashboard(const Snapshot &s) {
   const float activeWatts = charging ? s.chargeWatts : s.dischargeWatts;
   setText(w.metric[6], activeWatts > 1.0f ? wattsText(activeWatts) : "--");
   setTextColor(w.metric[6], charging ? COL_ACCENT : COL_TEXT);
+  setText(w.metric[7], s.micEnabled ? String(s.micRms) : "--");
 }
 
 void updatePower(const Snapshot &s) {
