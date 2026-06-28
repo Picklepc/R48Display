@@ -252,7 +252,8 @@ struct BatterySample {
   String label = "unknown";
   String inputStatus = "unknown";
   bool present = false;
-  bool usbCdcConnected = false;
+  bool usbCdcConnected = false;  // broad: SOF or battery-level inference
+  bool usbSofDetected = false;   // strict: SOF-only (USB host actively connected)
   uint32_t updatedMs = 0;
 };
 
@@ -1901,19 +1902,23 @@ void apiMqttTest() {
 // ── Battery degradation tracking ─────────────────────────────────────────────
 
 void loadDegradation() {
+  prefs.begin("r48disp", true);
   degradation.maxCellSpreadMv = prefs.getFloat("dMaxSpd", 0.0f);
   degradation.minCellVoltageV = prefs.getFloat("dMinCv", 9.9f);
   degradation.maxTempC = prefs.getFloat("dMaxTc", -99.0f);
   degradation.lowVoltageEvents = prefs.getUInt("dLvEvt", 0);
   degradation.highCurrentEvents = prefs.getUInt("dHcEvt", 0);
+  prefs.end();
 }
 
 void saveDegradation() {
+  prefs.begin("r48disp", false);
   prefs.putFloat("dMaxSpd", degradation.maxCellSpreadMv);
   prefs.putFloat("dMinCv", degradation.minCellVoltageV);
   prefs.putFloat("dMaxTc", degradation.maxTempC);
   prefs.putUInt("dLvEvt", degradation.lowVoltageEvents);
   prefs.putUInt("dHcEvt", degradation.highCurrentEvents);
+  prefs.end();
 }
 
 void updateDegradation() {
@@ -1988,7 +1993,9 @@ uint8_t nextMaintId() {
 }
 
 void loadMaintenance() {
+  prefs.begin("r48disp", true);
   const String json = prefs.getString("maint", "[]");
+  prefs.end();
   JsonDocument doc;
   if (deserializeJson(doc, json) != DeserializationError::Ok) return;
   maintenanceItems.clear();
@@ -2021,7 +2028,9 @@ void saveMaintenance() {
   }
   String out;
   serializeJson(doc, out);
+  prefs.begin("r48disp", false);
   prefs.putString("maint", out);
+  prefs.end();
 }
 
 void initDefaultMaintenanceItems() {
@@ -2513,12 +2522,14 @@ void updateScreenBattery() {
     screenBatteryRiseSamples = 0;
   }
 
-  // USB host connection (SOF-based, works for computer; not power adapters)
-  bool usbPowerPresent = false;
+  // SOF-only detection: true when a USB host is actively connected (computer, not charger adapters)
+  bool usbSofConnected = false;
 #if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
-  usbPowerPresent = HWCDC::isPlugged();
+  usbSofConnected = HWCDC::isPlugged();
 #endif
-  // Inference: board battery ≥80% strongly suggests external/charger power
+  screenBattery.usbSofDetected = usbSofConnected;
+  // Broader inference for display/status — battery ≥80% suggests external/charger power
+  bool usbPowerPresent = usbSofConnected;
   if (!usbPowerPresent && screenBattery.present && screenBattery.percent >= 80)
     usbPowerPresent = true;
   if (usbPowerPresent || !screenBattery.present ||
@@ -3753,6 +3764,10 @@ void setup() {
     Serial.println(F("PSRAM not detected"));
   }
   loadSettings();
+  // Write any keys that didn't exist yet (new fields added by firmware update).
+  // This ensures title, hoursBaseline, and other recently-added keys are present
+  // in NVS even if the device hasn't been through the settings form since the upgrade.
+  saveSettings();
   applyBatteryHold();
   setupMqtt();
   loadDegradation();
@@ -3803,21 +3818,28 @@ void loop() {
   if (now - lastBatteryMs >= BATTERY_REFRESH_MS) {
     lastBatteryMs = now;
     updateScreenBattery();
-    // Shutdown when USB removed and internal battery is disabled.
-    // usbEverSeen prevents spurious shutdown on boot before USB detection settles,
-    // which would cause a re-shutdown boot loop on USB reconnect.
-    static bool usbEverSeen = false;
-    static uint32_t usbGoneMs = 0;
-    if (screenBattery.usbCdcConnected) usbEverSeen = true;
-    if (screenBattery.present && !screenBattery.usbCdcConnected && usbEverSeen) {
-      if (usbGoneMs == 0) usbGoneMs = now;
-      else if (!settings.powerSaveEnabled && now - usbGoneMs > 8000UL) {
+    // Shutdown when external power is lost and internal battery backup is disabled.
+    // Two detection paths prevent boot-loop false triggers (firing before USB settles):
+    //   SOF path: USB host (computer) sends SOF → removal detected instantly
+    //   Inference path: battery ≥80% implies charger/USB power → fires when battery
+    //                   drops below 80% after being above it (slower, for DCP adapters)
+    // Each path tracks "was ever seen" so the timer only starts on a real transition.
+    static bool usbSofEverSeen = false;
+    static bool usbInferenceEverSeen = false;
+    static uint32_t shutdownGoneMs = 0;
+    if (screenBattery.usbSofDetected) usbSofEverSeen = true;
+    if (screenBattery.usbCdcConnected) usbInferenceEverSeen = true;
+    const bool sofGone = usbSofEverSeen && !screenBattery.usbSofDetected;
+    const bool inferenceGone = usbInferenceEverSeen && !screenBattery.usbCdcConnected;
+    if (screenBattery.present && (sofGone || inferenceGone)) {
+      if (shutdownGoneMs == 0) shutdownGoneMs = now;
+      else if (!settings.powerSaveEnabled && now - shutdownGoneMs > 8000UL) {
         saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
         delay(80);
         digitalWrite(PIN_BATTERY_HOLD, LOW);
       }
     } else {
-      usbGoneMs = 0;
+      shutdownGoneMs = 0;
     }
     // Graceful shutdown on critically low board battery
     if (screenBattery.present && !screenBattery.usbCdcConnected &&
