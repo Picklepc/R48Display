@@ -102,6 +102,24 @@ USB flash (first-time or if OTA is not yet configured):
 pio run -e waveshare_esp32_s3_touch_lcd_1_85 -t upload --upload-port YOUR_PORT
 ```
 
+### v0.3.0 NVS Partition Change
+
+Version 0.3.0 moves and enlarges the default NVS partition to 256 KB. This
+requires a full USB/fresh flash from any 0.2.x or older install because OTA only
+updates the app partition and cannot rewrite the partition table.
+
+Recommended upgrade from 0.2.x:
+
+1. Record Wi-Fi, BMS, MQTT, AP, and hour-meter settings. Existing NVS settings
+   are not automatically migrated because the NVS partition moved.
+2. Erase flash.
+3. Flash over USB with PlatformIO, or flash the merged release binary at
+   offset `0x0`.
+4. Re-enter settings through the setup AP on first boot.
+
+After 0.3.0 has been installed once with the new partition table, later app-only
+OTA updates can be used normally.
+
 OTA upload after Wi-Fi is configured (edit `upload_port` in `platformio.ini` to
 your device IP):
 
@@ -200,8 +218,14 @@ release artifacts or build from source to ensure you have the latest version.
 To flash the merged binary at offset `0x0` with `esptool.py`:
 
 ```sh
+esptool.py --chip esp32s3 --port YOUR_PORT erase_flash
 esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x0 R48Display-vX.Y.Z-merged.bin
 ```
+
+For 0.3.0 and later, use the merged binary for erased boards, recovery flashes,
+and any install that needs the partition table changed. The app-only
+`firmware.bin` is for OTA or PlatformIO app uploads after the partition table is
+already installed.
 
 ## Documentation
 

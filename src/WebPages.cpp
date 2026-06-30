@@ -155,6 +155,21 @@ String settingsBody() {
       "<div id='wifi-results' class='list'></div>"
       "</div>"
 
+      // AP Mode — password and LCD advertising
+      "<div class='settings-group'>"
+      "<h3>AP Mode</h3>"
+      "<div class='form-grid'>"
+      "<label>AP Password"
+      "<span class='hint'>Password for the setup AP shown on the LCD. Must be 8+ characters. Leave blank to keep current.</span>"
+      "<input name='ap_password' type='password' autocomplete='new-password' placeholder='leave blank to keep current'></label>"
+      "</div>"
+      "<label class='check'>"
+      "<input name='advertise_ap_credentials' id='advertiseApCb' type='checkbox'>"
+      "Show AP credentials on LCD status screen"
+      "</label>"
+      "<p class='note'>When enabled, the SSID and password cycle on the bottom status line while the device is in AP mode. Disable if the display is in a public area.</p>"
+      "</div>"
+
       // System — identity fields directly after WiFi
       "<div class='settings-group'>"
       "<h3>System</h3>"
@@ -332,12 +347,26 @@ String settingsBody() {
 
 String maintenanceBody() {
   return F(
+      // Hours graph
       "<section class='card wide'>"
-      "<div class='section-head'><h2>Maintenance</h2>"
-      "<button class='primary' onclick='openMaintForm(null)'>+ Add Item</button></div>"
-      "<div id='maint-list'><div class='empty'>Loading…</div></div>"
+      "<h2>Hour Meter</h2>"
+      "<div id='hours-bar' style='display:flex;height:24px;border-radius:6px;overflow:hidden;background:var(--line);margin:10px 0 8px'></div>"
+      "<div id='hours-legend' style='display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted)'>Loading\xe2\x80\xa6</div>"
       "</section>"
-      "<div id='maint-modal' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;display:none;align-items:center;justify-content:center'>"
+
+      // Maintenance list
+      "<section class='card wide'>"
+      "<div class='section-head'>"
+      "<h2>Maintenance</h2>"
+      "<div style='display:flex;gap:8px'>"
+      "<a href='/api/maintenance/export' style='border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:8px 11px;text-decoration:none;font:inherit;cursor:pointer;font-size:13px'>Export CSV</a>"
+      "<button class='primary' onclick='openMaintForm(null)'>+ Add Item</button>"
+      "</div></div>"
+      "<div id='maint-list'><div class='empty'>Loading\xe2\x80\xa6</div></div>"
+      "</section>"
+
+      // Add / edit modal
+      "<div id='maint-modal' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center'>"
       "<div class='card' style='min-width:280px;max-width:420px;width:92%;padding:20px'>"
       "<h3 id='maint-modal-title'>Add Item</h3>"
       "<div class='form-grid'>"
@@ -349,15 +378,27 @@ String maintenanceBody() {
       "<option value='DAYS'>Days</option>"
       "</select></label>"
       "<label id='mf-interval-label'>Interval (h)<input id='mf-interval' type='number' min='0.1' step='any'></label>"
-      "<label>Notes<input id='mf-notes' maxlength='80' autocomplete='off'></label>"
+      "<label>Item notes<input id='mf-notes' maxlength='80' autocomplete='off'></label>"
       "</div>"
       "<input type='hidden' id='mf-id' value='0'>"
       "<div style='display:flex;gap:8px;margin-top:14px'>"
       "<button class='primary' onclick='saveMaintItem()'>Save</button>"
       "<button onclick='closeMaintModal()'>Cancel</button>"
-      "</div>"
-      "</div>"
-      "</div>");
+      "</div></div></div>"
+
+      // Mark-done modal (with completion notes)
+      "<div id='maint-confirm-modal' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center'>"
+      "<div class='card' style='min-width:280px;max-width:420px;width:92%;padding:20px'>"
+      "<h3 id='mc-name' style='margin-bottom:8px'>Mark Done</h3>"
+      "<p class='note' style='margin-bottom:14px'>Resets the counter and saves a completion record. Each item stores the 10 most recent completions.</p>"
+      "<label style='display:grid;gap:6px;color:var(--muted);font-size:13px'>Completion notes (optional)"
+      "<textarea id='mc-notes' rows='3' maxlength='200' style='width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px;font:inherit;resize:vertical'></textarea>"
+      "</label>"
+      "<input type='hidden' id='mc-id' value='0'>"
+      "<div style='display:flex;gap:8px;margin-top:14px'>"
+      "<button class='primary' onclick='submitConfirmMaint()'>Confirm Done</button>"
+      "<button onclick='closeConfirmModal()'>Cancel</button>"
+      "</div></div></div>");
 }
 
 String updateBody() {
@@ -378,6 +419,7 @@ const $ = (id) => document.getElementById(id);
 const qsa = (sel) => Array.from(document.querySelectorAll(sel));
 let themeOptions = [];
 let usageCategories = [];
+let _loadedHoursBaseline = 0;
 
 function get(obj, path, fallback = '--') {
   return path.split('.').reduce((o, key) => (o && o[key] !== undefined) ? o[key] : undefined, obj) ?? fallback;
@@ -673,6 +715,7 @@ async function loadSettings() {
     if (el.type === 'checkbox') el.checked = !!data[key];
     else if (data[key] !== undefined) el.value = data[key];
   });
+  _loadedHoursBaseline = parseFloat(data.hours_baseline || '0');
   const battCb = document.getElementById('battEnCb');
   if (battCb) toggleBattOptions(battCb.checked);
   updateThemeDescription();
@@ -788,8 +831,14 @@ function wireActions() {
     data.ntp_enabled = form.elements.ntp_enabled.checked ? '1' : '0';
     data.power_save_enabled = form.elements.power_save_enabled.checked ? '1' : '0';
     data.mqtt_enabled = form.elements.mqtt_enabled.checked ? '1' : '0';
+    data.advertise_ap_credentials = form.elements.advertise_ap_credentials.checked ? '1' : '0';
     delete data.standby_hint;
     delete data.hours_counted;
+    // Only send hours_baseline if the user actually changed it; otherwise let
+    // hours_total take effect if the user edited that field instead.
+    if (Math.abs(parseFloat(data.hours_baseline || '0') - _loadedHoursBaseline) < 0.005) {
+      delete data.hours_baseline;
+    }
     const saved = await postForm('/api/settings', data);
     if (!saved.ok) {
       const detail = await saved.text();
@@ -816,10 +865,36 @@ setInterval(refresh, 2500);
 const MAINT_TYPE_LABELS = {HOURS_ACTIVE:'Active Hours',HOURS_WORKING:'Working Hours',HOURS_TOTAL:'Total Hours',DAYS:'Days'};
 const MAINT_TYPE_UNIT   = {HOURS_ACTIVE:'h',HOURS_WORKING:'h',HOURS_TOTAL:'h',DAYS:'d'};
 
+async function loadMaintHours() {
+  const data = await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()).catch(()=>null);
+  const h = data?.hours || {};
+  const standby = parseFloat(h.standby)||0;
+  const active  = parseFloat(h.active)||0;
+  const working = parseFloat(h.working)||0;
+  const total   = standby + active + working;
+  const bar = $('hours-bar'), legend = $('hours-legend');
+  if (!bar || !legend) return;
+  if (total < 0.01) {
+    legend.innerHTML = '<span>No hours recorded yet</span>';
+    return;
+  }
+  const segs = [
+    {label:'Standby', val:standby, color:'var(--muted)'},
+    {label:'Active',  val:active,  color:'var(--warn)'},
+    {label:'Working', val:working, color:'var(--bad)'},
+  ];
+  bar.innerHTML = segs.filter(s=>s.val>0).map(s =>
+    `<div title='${s.label}: ${s.val.toFixed(1)}h' style='width:${(s.val/total*100).toFixed(1)}%;background:${s.color};height:100%;transition:width .4s'></div>`
+  ).join('');
+  legend.innerHTML = [{label:'Total',val:total,color:'var(--text)'},...segs].map(s =>
+    `<span style='display:inline-flex;align-items:center;gap:4px'><span style='width:10px;height:10px;border-radius:2px;background:${s.color};flex-shrink:0'></span><b>${s.val.toFixed(1)}h</b>&nbsp;${s.label}</span>`
+  ).join('');
+}
+
 async function loadMaintenance() {
   const host = $('maint-list');
   if (!host) return;
-  const items = await (await fetch('/api/maintenance',{cache:'no-store'})).json().catch(()=>[]);
+  const items = await fetch('/api/maintenance',{cache:'no-store'}).then(r=>r.json()).catch(()=>[]);
   if (!items.length) { host.innerHTML="<div class='empty'>No maintenance items — add one above.</div>"; return; }
   host.innerHTML = items.map(it => {
     const pct = Math.min(100, parseFloat(it.pct)||0);
@@ -842,13 +917,78 @@ async function loadMaintenance() {
         <span>${it.overdue ? 'overdue' : remaining.toFixed(1)+unit+' left'} / ${parseFloat(it.interval).toFixed(0)}${unit}</span>
       </div>
       ${it.notes ? `<div style='font-size:12px;color:var(--muted);margin-bottom:8px'>${it.notes}</div>` : ''}
-      <div style='display:flex;gap:8px'>
-        <button onclick='confirmMaint(${it.id})' class='primary'>Mark Done</button>
+      <div style='display:flex;gap:8px;flex-wrap:wrap'>
+        <button onclick='openConfirmModal(${it.id},${JSON.stringify(it.name)})' class='primary'>Mark Done</button>
         <button onclick='openMaintForm(${JSON.stringify(it)})'>Edit</button>
+        <button onclick='toggleHistory(${it.id},this)'>&#9658; History</button>
         <button onclick='deleteMaint(${it.id})' style='color:var(--bad)'>Delete</button>
       </div>
+      <div id='hist-${it.id}' style='display:none;margin-top:10px'></div>
     </div>`;
   }).join('');
+}
+
+function openConfirmModal(id, name) {
+  $('mc-id').value = id;
+  $('mc-name').textContent = 'Mark Done — ' + name;
+  $('mc-notes').value = '';
+  $('maint-confirm-modal').style.display = 'flex';
+  $('mc-notes').focus();
+}
+function closeConfirmModal() { $('maint-confirm-modal').style.display = 'none'; }
+
+async function submitConfirmMaint() {
+  const id = $('mc-id').value;
+  const notes = $('mc-notes').value.trim();
+  const res = await postForm('/api/maintenance/confirm', {id, notes});
+  if (!res.ok) { alert('Failed to record completion'); return; }
+  closeConfirmModal();
+  loadMaintenance();
+}
+
+async function toggleHistory(id, btn) {
+  const panel = $('hist-' + id);
+  if (!panel) return;
+  if (panel.style.display !== 'none') {
+    panel.style.display = 'none';
+    btn.innerHTML = '&#9658; History';
+    return;
+  }
+  btn.innerHTML = '&#9660; History';
+  panel.style.display = 'block';
+  panel.innerHTML = "<div class='empty' style='font-size:13px'>Loading…</div>";
+  await loadItemHistory(id, panel);
+}
+
+async function loadItemHistory(id, panel) {
+  const data = await fetch('/api/maintenance/history?id='+id,{cache:'no-store'}).then(r=>r.json()).catch(()=>null);
+  if (!data || !data.entries || !data.entries.length) {
+    panel.innerHTML = "<div class='empty' style='font-size:13px'>No history yet — use Mark Done to record a completion.</div>";
+    return;
+  }
+  const unit = MAINT_TYPE_UNIT[data.type]||'h';
+  const sorted = [...data.entries].reverse();
+  panel.innerHTML = "<div style='border-top:1px solid var(--line);padding-top:8px'>" +
+    sorted.map(e => {
+      const date = e.ts > 0 ? new Date(e.ts*1000).toLocaleString() : 'Unknown date';
+      return `<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px'>
+        <div>
+          <div>${date}</div>
+          ${e.notes ? `<div style='color:var(--muted);margin-top:2px'>${e.notes}</div>` : ''}
+        </div>
+        <div style='display:flex;align-items:center;gap:8px;flex-shrink:0'>
+          <span style='color:var(--muted);font-size:12px'>${parseFloat(e.val).toFixed(1)}${unit}</span>
+          <button onclick='deleteHistoryEntry(${id},${e.ts})' style='color:var(--bad);padding:4px 8px;font-size:12px'>✕</button>
+        </div>
+      </div>`;
+    }).join('') + "</div>";
+}
+
+async function deleteHistoryEntry(itemId, ts) {
+  if (!confirm('Remove this history entry?')) return;
+  await postForm('/api/maintenance/history/delete', {id:itemId, ts});
+  const panel = $('hist-' + itemId);
+  if (panel) await loadItemHistory(itemId, panel);
 }
 
 function openMaintForm(item) {
@@ -859,18 +999,15 @@ function openMaintForm(item) {
   $('mf-interval').value = item ? parseFloat(item.interval).toFixed(1) : '100';
   $('mf-notes').value = item ? (item.notes||'') : '';
   updateMaintIntervalLabel();
-  const modal = $('maint-modal');
-  modal.style.display='flex';
+  $('maint-modal').style.display = 'flex';
 }
-
-function closeMaintModal() { $('maint-modal').style.display='none'; }
+function closeMaintModal() { $('maint-modal').style.display = 'none'; }
 
 function updateMaintIntervalLabel() {
   const t = $('mf-type')?.value||'HOURS_ACTIVE';
   const lbl = $('mf-interval-label');
   if (lbl) lbl.firstChild.textContent = 'Interval (' + (MAINT_TYPE_UNIT[t]||'h') + ')';
 }
-
 $('mf-type')?.addEventListener('change', updateMaintIntervalLabel);
 
 async function saveMaintItem() {
@@ -882,26 +1019,20 @@ async function saveMaintItem() {
     notes: $('mf-notes').value.trim()
   };
   if (!data.name) { alert('Name is required'); return; }
-  if (!parseFloat(data.interval) > 0) { alert('Interval must be > 0'); return; }
+  if (!(parseFloat(data.interval) > 0)) { alert('Interval must be > 0'); return; }
   const res = await postForm('/api/maintenance', data);
   if (!res.ok) { alert('Failed to save item'); return; }
   closeMaintModal();
   loadMaintenance();
 }
 
-async function confirmMaint(id) {
-  if (!confirm('Mark this item as done? This resets the counter from now.')) return;
-  await postForm('/api/maintenance/confirm', {id});
-  loadMaintenance();
-}
-
 async function deleteMaint(id) {
-  if (!confirm('Delete this maintenance item?')) return;
+  if (!confirm('Delete this item and all its history?')) return;
   await postForm('/api/maintenance/delete', {id});
   loadMaintenance();
 }
 
-if ($('maint-list')) loadMaintenance();
+if ($('maint-list')) { loadMaintHours(); loadMaintenance(); }
 )JS");
 }
 

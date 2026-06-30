@@ -97,6 +97,9 @@ Four operational hour counters replace the single `runtimeSeconds` field:
 A maintenance reminder system stores up to 20 user-defined items in NVS.
 Each item tracks elapsed hours (or days, or BMS cycles) against a user-set
 interval, with a confirmation workflow to log when maintenance is performed.
+Firmware 0.3.0 also stores per-item completion history in NVS and uses a 256 KB
+default NVS partition at `0xa10000`; installing that partition table requires a
+full USB/fresh flash from older releases.
 
 BMS degradation metrics (cycle count, capacity fade, lifetime extremes, event
 counts) are tracked from BMS telemetry and local observation.

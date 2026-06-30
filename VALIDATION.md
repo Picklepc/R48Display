@@ -24,13 +24,28 @@ Pass / Fail      : _______________
 
 - [ ] `platformio run -e waveshare_esp32_s3_touch_lcd_1_85` completes with
       no errors or warnings in local source files.
-- [ ] Flash size is under 5.5 MB (leaves headroom for OTA slot).
+- [ ] Flash size is under 5.0 MB (fits the configured OTA slot).
 - [ ] RAM usage (heap + static) is reported under 220 KB.
 - [ ] `platformio check -e waveshare_esp32_s3_touch_lcd_1_85 --skip-packages`
       reports no findings in local `.cpp` or `.h` files.
 - [ ] No credentials, Wi-Fi SSIDs, MAC addresses, or local file paths appear in
       committed source or markdown files.
 - [ ] `.gitignore` covers `*.bin`, `*.elf`, `*.map`, `.pio/`, `.env`.
+
+---
+
+## Section 1A - Partition Table and NVS Layout
+
+- [ ] Generated partition table shows `otadata` at `0xe000`, `app0` at
+      `0x10000`, `app1` at `0x510000`, and `nvs` at `0xa10000` with size
+      `256K`.
+- [ ] Fresh install from 0.2.x or older was done by erasing flash, then using
+      PlatformIO USB upload or the merged release binary at offset `0x0`.
+- [ ] App-only OTA was not used as the first 0.3.0 install path.
+- [ ] After first boot, `/api/status` includes `hardware.nvs.used_entries`,
+      `free_entries`, `total_entries`, and `pct_used`.
+- [ ] Settings are re-entered after the fresh install; old NVS settings from
+      0.2.x are not assumed to migrate automatically.
 
 ---
 
@@ -188,9 +203,14 @@ Requires a device with the onboard LiPo circuit populated.
 - [ ] `/api/maintenance` GET returns empty array on a clean device.
 - [ ] Create a maintenance item via POST. Item appears in GET with correct
       `elapsed`, `remaining`, and `pct` values.
-- [ ] `/api/maintenance/<id>/confirm` POST resets elapsed to zero and records
+- [ ] `/api/maintenance/confirm` POST resets elapsed to zero and records
       current timestamp.
-- [ ] `/api/maintenance/<id>` DELETE removes item from list.
+- [ ] Mark Done accepts optional completion notes and stores a history entry.
+- [ ] Maintenance History expands for each item and shows the most recent
+      completion records.
+- [ ] Maintenance CSV export downloads a file with item, type, interval,
+      completion timestamp, value, and notes.
+- [ ] `/api/maintenance/delete` POST removes item from list.
 - [ ] Overdue item (elapsed > interval) shows red indicator in web UI and
       increments the overdue badge on LCD Status page.
 - [ ] Preset templates appear on a fresh device after first boot.

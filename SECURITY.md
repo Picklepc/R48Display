@@ -30,7 +30,8 @@ Please do not open public GitHub issues for security vulnerabilities.
 - TLS support is planned but not yet implemented.
 
 ### Credentials in NVS
-- WiFi and OTA passwords are stored in ESP32 NVS flash. Physical access to the device allows extraction via JTAG or flash dump.
+- WiFi, AP, OTA, and MQTT passwords are stored in ESP32 NVS flash. Physical access to the device allows extraction via JTAG or flash dump.
+- Firmware 0.3.0 moves the default NVS partition to `0xa10000` and expands it to 256 KB. Upgrades from older partition tables require a full USB/fresh flash; OTA alone does not move stored credentials.
 - `/api/settings` GET never returns plaintext passwords; it returns boolean `_set` flags only.
 
 ### BLE

@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 static constexpr const char *PROJECT_NAME = "R48Display";
-static constexpr const char *FIRMWARE_VERSION = "0.2.3";
+static constexpr const char *FIRMWARE_VERSION = "0.3.0";
 
 // Waveshare ESP32-S3-Touch-LCD-1.85 display pinout.
 static constexpr int PIN_LCD_BL = 5;
@@ -32,6 +32,14 @@ static constexpr int PIN_BATTERY_HOLD = 6;
 static constexpr int PIN_BATTERY_KEY = 7;
 static constexpr int PIN_BATTERY_ADC = 8;
 static constexpr float BATTERY_ADC_RATIO = 3.0f;
+
+// TF card (SD) SPI — Waveshare ESP32-S3 Touch LCD 1.85 has an onboard slot.
+// CS routes through the IO expander (TCA9554 EXIO3) rather than a direct GPIO.
+// Reserved for future SD history expansion; not yet used by firmware.
+static constexpr int PIN_SD_MISO = 16;
+static constexpr int PIN_SD_MOSI = 17;
+static constexpr int PIN_SD_SCK  = 14;
+// PIN_SD_CS is TCA9554 EXIO3 — drive via I2C, not a direct GPIO pin.
 
 // Onboard I2S microphone on the 1.85-inch board variant that includes it.
 // Safe to leave disabled on variants without the microphone.

@@ -472,10 +472,14 @@ void updateStatus(const Snapshot &s) {
   setText(w.metric[6], s.firmware);
   setText(w.metric[7], s.uptime);
   if (s.provisioning && !s.wifiConnected) {
-    const uint8_t step = static_cast<uint8_t>((millis() / 4000) % 3);
-    if (step == 0) setText(w.metric[8], String("Wi-Fi: ") + s.ssid);
-    else if (step == 1) setText(w.metric[8], String("Pass: ") + s.apPassword);
-    else setText(w.metric[8], "Open 192.168.4.1 to set up");
+    if (s.advertiseApCreds) {
+      const uint8_t step = static_cast<uint8_t>((millis() / 4000) % 3);
+      if (step == 0) setText(w.metric[8], String("Wi-Fi: ") + s.ssid);
+      else if (step == 1) setText(w.metric[8], String("Pass: ") + s.apPassword);
+      else setText(w.metric[8], "Open 192.168.4.1 to set up");
+    } else {
+      setText(w.metric[8], "Open 192.168.4.1 to set up");
+    }
   } else if (s.maintOverdue > 0) {
     String m = String(s.maintOverdue) + " maintenance item";
     if (s.maintOverdue > 1) m += "s";

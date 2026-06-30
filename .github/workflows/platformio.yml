@@ -49,10 +49,24 @@ jobs:
           PARTS=$BUILD/partitions.bin
           BOOT_APP0=$(find ~/.platformio -name boot_app0.bin | head -1)
           APP=$BUILD/firmware.bin
+          partition_offset() {
+            awk -F, -v name="$1" '
+              /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+              {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $4)
+                if ($1 == name) { print $4; exit }
+              }
+            ' partitions.csv
+          }
+          OTADATA_OFFSET=$(partition_offset otadata)
+          APP_OFFSET=$(partition_offset app0)
+          test -n "$OTADATA_OFFSET"
+          test -n "$APP_OFFSET"
           python "$ESPTOOL" --chip esp32s3 merge_bin \
             -o firmware-merged.bin \
             --flash_mode qio --flash_freq 80m --flash_size 16MB \
-            0x0 "$BOOT" 0x8000 "$PARTS" 0xe000 "$BOOT_APP0" 0x10000 "$APP"
+            0x0 "$BOOT" 0x8000 "$PARTS" "$OTADATA_OFFSET" "$BOOT_APP0" "$APP_OFFSET" "$APP"
           sha256sum "$APP" firmware-merged.bin > checksums.sha256
 
       - name: Upload artifacts

@@ -149,9 +149,15 @@ enum MaintenanceType : uint8_t {
 };
 ```
 
-Total storage: up to 20 items × ~140 bytes = ~2.8 KB. Store serialized as JSON
-in a single NVS string key `maint_items`. JSON compresses well and is easier to
-inspect for debugging than a raw binary format.
+Total storage: up to 20 items x ~140 bytes = ~2.8 KB. Store serialized as JSON
+in NVS. Current firmware uses the `maint` key for the item list and `mh_<id>`
+keys for per-item completion history. Each item keeps the 10 most recent
+completion records with timestamp, reference value, and optional notes.
+
+The 0.3.0 partition table expands default NVS to 256 KB so maintenance items and
+history do not crowd out Wi-Fi, BMS, MQTT, hour-meter, and degradation settings.
+The new NVS partition requires a full USB/fresh flash when upgrading from 0.2.x;
+OTA alone cannot install the new partition table.
 
 ### Progress Calculation
 
@@ -209,26 +215,40 @@ Creates or updates a maintenance item. Body (JSON):
 
 Returns the saved item including computed progress.
 
-**POST `/api/maintenance/<id>/confirm`**
+**POST `/api/maintenance/confirm`**
 
 Marks the item as done. Records current timestamp and current reference value
-as the new baseline. Returns updated item with `elapsed: 0` and `pct: 0`.
+as the new baseline. Also appends one completion history record for the item.
+Returns updated item with `elapsed: 0` and `pct: 0`.
 
 Optional body:
 ```json
 {
-  "note": "Replaced blades, installed OEM set"
+  "id": 1,
+  "notes": "Replaced blades, installed OEM set"
 }
 ```
-If provided, `note` is appended to the item's notes with a timestamp prefix.
+If provided, `notes` is stored in the item's history entry.
 
-**DELETE `/api/maintenance/<id>`**
+**GET `/api/maintenance/history?id=<id>`**
 
-Removes item. Returns `{"ok": true}`.
+Returns the 10 most recent completion records for one item.
+
+**POST `/api/maintenance/history/delete`**
+
+Removes a single history entry by `id` and `ts`. Returns `{"ok": true}`.
+
+**GET `/api/maintenance/export`**
+
+Downloads maintenance items and history as CSV.
+
+**POST `/api/maintenance/delete`**
+
+Removes item and its history. Returns `{"ok": true}`.
 
 ### Preset Templates
 
-On first boot (when `maint_items` NVS key is absent), populate with three
+On first boot (when the `maint` NVS key is absent), populate with three
 default templates so the user has a starting point. Templates use generic
 language appropriate for all usage categories:
 

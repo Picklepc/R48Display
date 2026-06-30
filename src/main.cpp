@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <map>
 #include <vector>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
@@ -14,6 +15,7 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
+#include <nvs_flash.h>
 
 #include <Arduino_GFX_Library.h>
 #include <NimBLEDevice.h>
@@ -242,6 +244,7 @@ struct AppSettings {
   // NTP settings — opt-in only; no WAN requests unless explicitly enabled
   bool ntpEnabled = true;
   String ntpServer = DEFAULT_NTP_SERVER;
+  bool advertiseApCredentials = true;  // cycle AP SSID/pass on LCD status line in AP mode
 };
 
 struct BatterySample {
@@ -739,6 +742,15 @@ struct MaintenanceItem {
 };
 
 std::vector<MaintenanceItem> maintenanceItems;
+
+struct MaintenanceHistoryEntry {
+  uint32_t ts  = 0;
+  float    val = 0.0f;
+  String   notes;
+};
+
+static constexpr uint8_t MAINT_HISTORY_MAX = 10;
+std::map<uint8_t, std::vector<MaintenanceHistoryEntry>> maintHistory;
 
 // Forward declarations — activityDetected/workDetected defined below
 bool activityDetected();
@@ -2052,6 +2064,55 @@ void initDefaultMaintenanceItems() {
   saveMaintenance();
 }
 
+void loadMaintenanceHistoryFor(uint8_t id) {
+  if (maintHistory.count(id)) return;
+  char key[8];
+  snprintf(key, sizeof(key), "mh_%u", id);
+  prefs.begin("r48disp", true);
+  const String json = prefs.getString(key, "[]");
+  prefs.end();
+  JsonDocument doc;
+  auto &entries = maintHistory[id];
+  entries.clear();
+  if (deserializeJson(doc, json) != DeserializationError::Ok) return;
+  for (JsonObject obj : doc.as<JsonArray>()) {
+    MaintenanceHistoryEntry e;
+    e.ts    = obj["ts"]    | (uint32_t)0;
+    e.val   = obj["val"]   | 0.0f;
+    e.notes = String(obj["notes"] | "");
+    if (e.ts > 0) entries.push_back(e);
+  }
+}
+
+void saveMaintenanceHistoryFor(uint8_t id) {
+  auto it = maintHistory.find(id);
+  if (it == maintHistory.end()) return;
+  char key[8];
+  snprintf(key, sizeof(key), "mh_%u", id);
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (const auto &e : it->second) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["ts"]    = e.ts;
+    obj["val"]   = serialized(String(e.val, 2));
+    obj["notes"] = e.notes;
+  }
+  String out;
+  serializeJson(doc, out);
+  prefs.begin("r48disp", false);
+  prefs.putString(key, out);
+  prefs.end();
+}
+
+void clearMaintenanceHistoryFor(uint8_t id) {
+  maintHistory.erase(id);
+  char key[8];
+  snprintf(key, sizeof(key), "mh_%u", id);
+  prefs.begin("r48disp", false);
+  prefs.remove(key);
+  prefs.end();
+}
+
 float maintCurrentValue(const MaintenanceItem &item) {
   switch (item.type) {
     case MaintType::HoursTotal:   return settings.hoursBaseline + hoursTotal;
@@ -2145,8 +2206,20 @@ void apiMaintenanceConfirm() {
   MaintenanceItem *item = nullptr;
   for (auto &it : maintenanceItems) if (it.id == id) { item = &it; break; }
   if (!item) { server.send(404, "text/plain", "item not found"); return; }
-  item->lastResetTs = static_cast<uint32_t>(time(nullptr));
-  item->lastResetVal = maintCurrentValue(*item);
+  const float val = maintCurrentValue(*item);
+  const uint32_t now = static_cast<uint32_t>(time(nullptr));
+  loadMaintenanceHistoryFor(id);
+  auto &hist = maintHistory[id];
+  MaintenanceHistoryEntry entry;
+  entry.ts    = now;
+  entry.val   = val;
+  entry.notes = server.arg("notes");
+  hist.push_back(entry);
+  if (hist.size() > MAINT_HISTORY_MAX)
+    hist.erase(hist.begin(), hist.begin() + (hist.size() - MAINT_HISTORY_MAX));
+  saveMaintenanceHistoryFor(id);
+  item->lastResetTs  = now;
+  item->lastResetVal = val;
   saveMaintenance();
   JsonDocument doc;
   JsonObject obj = doc.to<JsonObject>();
@@ -2162,14 +2235,84 @@ void apiMaintenanceDelete() {
       [id](const MaintenanceItem &it){ return it.id == id; }),
     maintenanceItems.end());
   if (maintenanceItems.size() == before) { server.send(404, "text/plain", "not found"); return; }
+  clearMaintenanceHistoryFor(id);
   saveMaintenance();
   server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void apiMaintenanceHistoryGet() {
+  const uint8_t id = static_cast<uint8_t>(server.arg("id").toInt());
+  const MaintenanceItem *item = nullptr;
+  for (const auto &it : maintenanceItems) if (it.id == id) { item = &it; break; }
+  if (!item) { server.send(404, "text/plain", "item not found"); return; }
+  loadMaintenanceHistoryFor(id);
+  JsonDocument doc;
+  JsonObject root = doc.to<JsonObject>();
+  root["type"] = maintTypeName(item->type);
+  JsonArray arr = root["entries"].to<JsonArray>();
+  for (const auto &e : maintHistory[id]) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["ts"]    = e.ts;
+    obj["val"]   = serialized(String(e.val, 2));
+    obj["notes"] = e.notes;
+  }
+  sendJson(doc);
+}
+
+void apiMaintenanceHistoryDelete() {
+  const uint8_t id = static_cast<uint8_t>(server.arg("id").toInt());
+  const uint32_t ts = static_cast<uint32_t>(server.arg("ts").toInt());
+  bool found = false;
+  for (const auto &it : maintenanceItems) if (it.id == id) { found = true; break; }
+  if (!found) { server.send(404, "text/plain", "item not found"); return; }
+  loadMaintenanceHistoryFor(id);
+  auto &hist = maintHistory[id];
+  const auto before = hist.size();
+  hist.erase(std::remove_if(hist.begin(), hist.end(),
+    [ts](const MaintenanceHistoryEntry &e){ return e.ts == ts; }), hist.end());
+  if (hist.size() == before) { server.send(404, "text/plain", "entry not found"); return; }
+  saveMaintenanceHistoryFor(id);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static String csvEscape(const String &s) {
+  if (s.indexOf(',') < 0 && s.indexOf('"') < 0 && s.indexOf('\n') < 0) return s;
+  String out = "\"";
+  for (char c : s) { if (c == '"') out += '"'; out += c; }
+  out += '"';
+  return out;
+}
+
+void apiMaintenanceExport() {
+  String csv = F("Item,Type,Interval,Completed At,Value At Completion,Notes\n");
+  for (const auto &item : maintenanceItems) {
+    loadMaintenanceHistoryFor(item.id);
+    const auto hit = maintHistory.find(item.id);
+    if (hit == maintHistory.end() || hit->second.empty()) {
+      csv += csvEscape(item.name) + ',' + maintTypeName(item.type) + ',' +
+             String(item.interval, 1) + ",,,\n";
+    } else {
+      for (const auto &e : hit->second) {
+        char buf[32] = "unknown";
+        if (e.ts > 0) {
+          time_t t = static_cast<time_t>(e.ts);
+          struct tm tm;
+          if (localtime_r(&t, &tm)) strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+        }
+        csv += csvEscape(item.name) + ',' + maintTypeName(item.type) + ',' +
+               String(item.interval, 1) + ',' + buf + ',' +
+               String(e.val, 2) + ',' + csvEscape(e.notes) + '\n';
+      }
+    }
+  }
+  server.sendHeader("Content-Disposition", "attachment; filename=\"maintenance.csv\"");
+  server.send(200, "text/csv", csv);
 }
 
 // ── end Maintenance tracker ──────────────────────────────────────────────────
 
 void loadSettings() {
-  prefs.begin("r48disp", false);
+  prefs.begin("r48disp", true);
   settings.hostname = prefs.getString("host", defaultHostname());
   settings.title = prefs.getString("title", settings.title);
   settings.tempUnit = prefs.getString("tempUnit", settings.tempUnit);
@@ -2211,6 +2354,7 @@ void loadSettings() {
   settings.chargeMinAmps = prefs.getFloat("chgMinA", 0.5f);
   settings.ntpEnabled = prefs.getBool("ntpOn", true);
   settings.ntpServer = prefs.getString("ntpHost", DEFAULT_NTP_SERVER);
+  settings.advertiseApCredentials = prefs.getBool("apCredsAdv", true);
   settings.labelCharging = prefs.getString("lblChg", "");
   settings.labelStandby = prefs.getString("lblStby", "");
   settings.labelActive = prefs.getString("lblAct", "");
@@ -2309,6 +2453,14 @@ void saveSettings() {
   prefs.putString("lblAct", settings.labelActive);
   prefs.putString("lblWork", settings.labelWorking);
   prefs.putFloat("hrsBase", settings.hoursBaseline);
+  prefs.putBool("apCredsAdv", settings.advertiseApCredentials);
+  prefs.end();
+}
+
+void cleanupLegacyNvsKeys() {
+  prefs.begin("r48disp", false);
+  if (prefs.isKey("runtime")) prefs.remove("runtime");
+  if (prefs.isKey("vehicle")) prefs.remove("vehicle");
   prefs.end();
 }
 
@@ -2993,6 +3145,7 @@ void drawDisplay(bool fullRedraw) {
   s.use24h = settings.timeFormat == "24h";
   s.powerSaveEnabled = settings.powerSaveEnabled;
   s.apPassword = settings.apPassword;
+  s.advertiseApCreds = settings.advertiseApCredentials;
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;
@@ -3282,6 +3435,16 @@ void addStatusJson(JsonDocument &doc) {
   hardware["touch_i2c"] = touchI2cAddresses;
   hardware["free_heap"] = ESP.getFreeHeap();
   hardware["psram"] = psramFound() ? ESP.getFreePsram() : 0;
+  nvs_stats_t nvsStats;
+  if (nvs_get_stats(nullptr, &nvsStats) == ESP_OK) {
+    JsonObject nvs = hardware["nvs"].to<JsonObject>();
+    nvs["used_entries"] = nvsStats.used_entries;
+    nvs["free_entries"] = nvsStats.free_entries;
+    nvs["total_entries"] = nvsStats.total_entries;
+    nvs["pct_used"] = nvsStats.total_entries > 0
+        ? serialized(String(100.0f * nvsStats.used_entries / nvsStats.total_entries, 1))
+        : serialized(String("0.0"));
+  }
 
   const R48Mic::Snapshot micState = R48Mic::snapshot();
   JsonObject mic = doc["mic"].to<JsonObject>();
@@ -3363,6 +3526,7 @@ void apiSettingsGet() {
   doc["time_format"] = settings.timeFormat;
   doc["ap_ssid"] = apSsid;
   doc["ap_password_set"] = settings.apPassword.length() >= 8;
+  doc["advertise_ap_credentials"] = settings.advertiseApCredentials;
   doc["ota_password_set"] = settings.otaPassword.length() >= 8;
   doc["wifi_ssid"] = settings.wifiSsid;
   doc["wifi_password_set"] = !settings.wifiPassword.isEmpty();
@@ -3427,6 +3591,8 @@ void apiSettingsPost() {
   if (server.hasArg("hostname")) settings.hostname = sanitizeHostname(server.arg("hostname"));
   if (server.hasArg("title")) { settings.title = server.arg("title"); settings.title.trim(); if (settings.title.length() > 64) settings.title = settings.title.substring(0, 64); }
   if (server.hasArg("ota_password") && server.arg("ota_password").length() >= 8) settings.otaPassword = server.arg("ota_password");
+  if (server.hasArg("ap_password") && server.arg("ap_password").length() >= 8) settings.apPassword = server.arg("ap_password");
+  if (server.hasArg("advertise_ap_credentials")) settings.advertiseApCredentials = server.arg("advertise_ap_credentials") == "1";
   if (server.hasArg("wifi_ssid")) settings.wifiSsid = server.arg("wifi_ssid");
   if (server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0) settings.wifiPassword = server.arg("wifi_password");
   if (server.hasArg("bms_name")) settings.bmsName = server.arg("bms_name");
@@ -3746,6 +3912,9 @@ void setupRoutes() {
   server.on("/api/maintenance", HTTP_POST, apiMaintenancePost);
   server.on("/api/maintenance/confirm", HTTP_POST, apiMaintenanceConfirm);
   server.on("/api/maintenance/delete", HTTP_POST, apiMaintenanceDelete);
+  server.on("/api/maintenance/history", HTTP_GET, apiMaintenanceHistoryGet);
+  server.on("/api/maintenance/history/delete", HTTP_POST, apiMaintenanceHistoryDelete);
+  server.on("/api/maintenance/export", HTTP_GET, apiMaintenanceExport);
   server.on("/api/mqtt/publish-now", HTTP_POST, apiMqttPublishNow);
   server.on("/api/mqtt/rediscover", HTTP_POST, apiMqttRediscover);
   server.on("/api/mqtt/test", HTTP_GET, apiMqttTest);
@@ -3794,6 +3963,17 @@ void setup() {
   // This ensures title, hoursBaseline, and other recently-added keys are present
   // in NVS even if the device hasn't been through the settings form since the upgrade.
   saveSettings();
+  cleanupLegacyNvsKeys();
+  {
+    nvs_stats_t nvsStats;
+    if (nvs_get_stats(nullptr, &nvsStats) == ESP_OK) {
+      Serial.printf("NVS: %u/%u entries used (%.1f%%), %u free\n",
+                    static_cast<unsigned>(nvsStats.used_entries),
+                    static_cast<unsigned>(nvsStats.total_entries),
+                    nvsStats.total_entries > 0 ? 100.0f * nvsStats.used_entries / nvsStats.total_entries : 0.0f,
+                    static_cast<unsigned>(nvsStats.free_entries));
+    }
+  }
   applyBatteryHold();
   setupMqtt();
   loadDegradation();

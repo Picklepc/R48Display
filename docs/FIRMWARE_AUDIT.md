@@ -80,9 +80,31 @@ upload_flags =
 
 Partition review:
 
-- Current layout is not minimal. It has `otadata` and two 5 MB OTA app slots, which is correct for OTA and leaves plenty of space for BLE/LVGL.
-- Current SPIFFS is 0x5f0000 even though the stable firmware intentionally does not require a filesystem. That is harmless but oversized.
-- Recommended release layout keeps large OTA slots and adds room for crash dump data/future small storage.
+- Current 0.3.0 layout has `otadata` and two 5 MB OTA app slots, which is
+  correct for OTA and leaves room for BLE/LVGL.
+- Default NVS is 256 KB at `0xa10000`. This fixes entry exhaustion from
+  settings, hour counters, BMS cache, degradation metrics, maintenance items,
+  and maintenance history.
+- `otadata` remains at `0xe000` and `app0` remains at `0x10000` because
+  Arduino/PlatformIO USB flashing assumes those offsets.
+- SPIFFS is still present but unused by firmware. Its space was reduced to make
+  room for the larger NVS partition.
+- Upgrading from older partition tables requires a full USB/fresh flash. OTA
+  cannot rewrite the partition table, and old NVS contents are not migrated
+  automatically because the NVS partition moved.
+
+Current `partitions.csv`:
+
+```csv
+# Name,   Type, SubType, Offset,  Size,    Flags
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x500000,
+app1,     app,  ota_1,   0x510000,0x500000,
+nvs,      data, nvs,     0xa10000,0x40000,
+spiffs,   data, spiffs,  0xa50000,0x5b0000,
+```
+
+Optional future layout if coredump/future storage is preferred:
 
 Drop-in `partitions.csv` if you want coredump/future storage instead of a huge SPIFFS area:
 

@@ -10,6 +10,7 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BoardConfig = Join-Path $Root "include\BoardConfig.h"
 $FirmwareDir = Join-Path $Root "firmware"
 $BuildDir = Join-Path $Root ".pio\build\$Environment"
+$PartitionsCsv = Join-Path $Root "partitions.csv"
 
 if (-not $Version) {
   $ConfigText = Get-Content -Raw $BoardConfig
@@ -34,6 +35,32 @@ $Pio = Resolve-Tool (Join-Path $env:USERPROFILE ".platformio\penv\Scripts\platfo
 $Python = Resolve-Tool (Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe") "python"
 $Esptool = Join-Path $env:USERPROFILE ".platformio\packages\tool-esptoolpy\esptool.py"
 $BootApp0 = Join-Path $env:USERPROFILE ".platformio\packages\framework-arduinoespressif32\tools\partitions\boot_app0.bin"
+
+function Get-PartitionOffset([string]$PartitionName) {
+  foreach ($Line in Get-Content $PartitionsCsv) {
+    $Trimmed = $Line.Trim()
+    if (-not $Trimmed -or $Trimmed.StartsWith("#")) {
+      continue
+    }
+
+    $Fields = $Line.Split(",") | ForEach-Object { $_.Trim() }
+    if ($Fields.Count -lt 5) {
+      continue
+    }
+
+    if ($Fields[0] -eq $PartitionName) {
+      if (-not $Fields[3]) {
+        throw "Partition '$PartitionName' must use an explicit offset for packaging."
+      }
+      return $Fields[3]
+    }
+  }
+
+  throw "Partition '$PartitionName' not found in $PartitionsCsv."
+}
+
+$OtaDataOffset = Get-PartitionOffset "otadata"
+$AppOffset = Get-PartitionOffset "app0"
 
 if (-not $SkipBuild) {
   & $Pio run -e $Environment
@@ -64,8 +91,8 @@ Copy-Item -Force $App $AppOut
   --flash_size 16MB `
   0x0 $Bootloader `
   0x8000 $Partitions `
-  0xe000 $BootApp0 `
-  0x10000 $App
+  $OtaDataOffset $BootApp0 `
+  $AppOffset $App
 
 Get-FileHash -Algorithm SHA256 $AppOut, $MergedOut |
   ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
@@ -75,3 +102,6 @@ Write-Host "Packaged:"
 Write-Host "  $AppOut"
 Write-Host "  $MergedOut"
 Write-Host "  $HashOut"
+Write-Host "Offsets:"
+Write-Host "  otadata $OtaDataOffset"
+Write-Host "  app0    $AppOffset"

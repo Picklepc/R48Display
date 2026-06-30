@@ -1,3 +1,37 @@
+# R48Display v0.3.0 — Release Notes
+
+## What's New in 0.3.0
+
+### NVS Partition Expansion
+- Default NVS storage is now 256 KB instead of the ESP-IDF default 20 KB. This gives room for settings, hour counters, cached BMS data, degradation metrics, maintenance items, and maintenance completion history.
+- The enlarged NVS partition lives after the two OTA app slots at `0xa10000`. `otadata` remains at `0xe000` and `app0` remains at `0x10000` so Arduino/PlatformIO USB flashing keeps using the offsets it expects.
+- `/api/status` includes NVS entry usage under `hardware.nvs` for field diagnostics.
+
+### Fresh Install Required for the New NVS Layout
+- Upgrading from 0.2.x to 0.3.0 requires a full USB/fresh flash so the new partition table is installed. OTA updates only replace the app partition; they cannot move or enlarge NVS.
+- Because NVS moved from the old `0x9000` area to `0xa10000`, saved settings are not automatically migrated. Record Wi-Fi, BMS, MQTT, AP, and hour-meter settings before flashing, then re-enter them after first boot.
+- Recommended recovery/fresh install flow: erase flash, then use PlatformIO USB upload or flash the merged release binary at offset `0x0`.
+
+```sh
+esptool.py --chip esp32s3 --port YOUR_PORT erase_flash
+esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x0 R48Display-v0.3.0-merged.bin
+```
+
+### Firmware Packaging Fixes
+- Local packaging and GitHub Actions now read `otadata` and `app0` offsets from `partitions.csv` when creating merged binaries.
+- App-only `firmware.bin` remains for OTA and PlatformIO app uploads after the partition table is already installed. Use the merged binary for erased boards and recovery flashes.
+
+### Maintenance History and Export
+- Maintenance confirmations can now include completion notes.
+- Each maintenance item keeps the 10 most recent completion records in NVS (`mh_<id>` keys).
+- The Maintenance page includes a history drawer per item, CSV export, and an hour-meter breakdown bar.
+
+### AP Mode Privacy
+- AP password can be changed from Settings.
+- The LCD setup status line can optionally hide AP SSID/password details and show only the setup URL.
+
+---
+
 # R48Display v0.2.3 — Release Notes
 
 ## What's New in 0.2.3
@@ -112,7 +146,7 @@
 
 ---
 
-# R48Display v1.0.0 — Release Notes
+# R48Display v0.1.0 — Release Notes
 
 ## What's New
 
@@ -177,10 +211,12 @@ When running from the onboard LiPo (not USB):
 
 ## Flashing
 
-Flash `firmware.bin` at offset `0x10000` or use the merged binary at `0x0`:
+For USB/recovery flashing, use the merged binary at offset `0x0`. The app-only
+`firmware.bin` is for OTA or PlatformIO uploads after the partition table is
+already installed.
 
 ```sh
-esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x10000 firmware.bin
+esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x0 R48Display-vX.Y.Z-merged.bin
 ```
 
 OTA update via PlatformIO after first flash:

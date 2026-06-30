@@ -435,6 +435,32 @@ Post-release incremental fixes shipped in v0.2.1 through v0.2.3.
 
 ---
 
+## Milestone 8 - v0.3.0 NVS Partition and Maintenance History
+
+### NVS Capacity and Flashing
+
+- [x] **M8-01** Default NVS partition expanded from 20 KB to 256 KB to hold
+      settings, hour counters, BMS cache, degradation metrics, maintenance items,
+      and maintenance history without exhausting entries.
+- [x] **M8-02** New layout keeps `otadata` at `0xe000` and `app0` at `0x10000`
+      for Arduino/PlatformIO USB flashing compatibility, and places `nvs` at
+      `0xa10000`.
+- [x] **M8-03** Release docs state that 0.3.0 requires a full USB/fresh flash;
+      OTA alone cannot install the new partition table or move NVS.
+- [x] **M8-04** Local packaging script and GitHub Actions merged-binary flow read
+      `otadata` and `app0` offsets from `partitions.csv`.
+
+### Maintenance and AP Mode
+
+- [x] **M8-05** Maintenance confirmations record optional notes and keep up to 10
+      completion history entries per item in NVS keys `mh_<id>`.
+- [x] **M8-06** Maintenance page adds item history drawers, CSV export, and an
+      hour-meter breakdown bar.
+- [x] **M8-07** AP mode settings allow changing the AP password and hiding AP
+      credentials from the LCD setup status line.
+
+---
+
 ## Backlog (Post-v1.0.0)
 
 These are desirable but explicitly out of scope for the initial stable release.
