@@ -24,7 +24,17 @@ esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x0 R48Display-v0.3.0-mer
 ### Maintenance History and Export
 - Maintenance confirmations can now include completion notes.
 - Each maintenance item keeps the 10 most recent completion records in NVS (`mh_<id>` keys).
-- The Maintenance page includes a history drawer per item, CSV export, and an hour-meter breakdown bar.
+- The Maintenance page opens with two hour-meter bars: total displayed hours
+  (install baseline plus tracked hours), then working / active / total hours.
+- The Maintenance page includes a history drawer per item, editable completion
+  dates and notes, CSV export, and machine/project notes.
+
+### LVGL Touch Navigation
+- The CST816 touch controller is now registered as an LVGL pointer input, using
+  screen-rotation-adjusted coordinates.
+- LCD page navigation now uses horizontal swipes. Simple taps no longer advance
+  pages accidentally, and double-tap wake still works while the display is
+  asleep.
 
 ### AP Mode Privacy
 - AP password can be changed from Settings.

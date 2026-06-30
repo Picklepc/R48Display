@@ -42,6 +42,7 @@ detection behavior, and BMS profile from the web settings.
 - Internal battery power management: adaptive BLE polling, LCD timeout, CPU
   and WiFi power saving when running from the onboard LiPo.
 - Selectable LCD rotation for alternate mounting angles.
+- Rotation-aware touchscreen swipe navigation for LCD pages.
 - Wi-Fi STA mode for normal use.
 - Temporary AP-only setup mode when no Wi-Fi credentials are saved or BOOT is
   held during startup.
@@ -145,8 +146,8 @@ thresholds are set from the web settings page and persist across reboots.
 |---|---|---|
 | Charging | Recharging | BMS current positive above charge threshold |
 | Standby | Standby | Discharge below activity threshold |
-| Active | Active | Discharge between activity and work thresholds |
-| Working | Working | Discharge above work threshold |
+| Active | Active | Discharge above activity threshold, including working |
+| Working | Working | Discharge above work threshold; subset of active |
 
 Category defaults are applied at first use. For example, the mower category
 defaults to "Mowing" for the working state and "Driving" for the active state.
@@ -159,8 +160,8 @@ OTA updates:
 
 - **Total hours** — device powered on
 - **Standby hours** — powered on, no significant draw
-- **Active hours** — mid-range current draw
-- **Working hours** — high current draw
+- **Active hours** — current draw above the active threshold, including working time
+- **Working hours** — high current draw, always a subset of active hours
 
 All four are shown in the web dashboard and available via the API.
 
@@ -170,6 +171,15 @@ The Maintenance page (`/maintenance`) lets you set reminders tied to working
 hours, active hours, total hours, elapsed days, or BMS cycle count. A progress
 bar shows how close each item is to its interval. When due, items are flagged
 in the web UI and a count appears on the LCD status page.
+
+The page starts with two hour-meter bars: total displayed hours
+(installation baseline plus tracked hours), then working / active / total
+hours. Maintenance history rows can be expanded per item, edited for completion
+date and notes, deleted, or exported as CSV.
+
+The same page also stores machine/project notes: manufacturer, model number,
+serial/VIN, manufacture date, gauge install date, battery model/install date,
+custom user-defined fields, and freeform installation or part-number notes.
 
 ## MQTT / Home Assistant
 

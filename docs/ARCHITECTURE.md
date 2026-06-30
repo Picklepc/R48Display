@@ -91,8 +91,8 @@ Four operational hour counters replace the single `runtimeSeconds` field:
 
 - `hoursTotal` — device powered on regardless of state
 - `hoursStandby` — current below activity threshold
-- `hoursActive` — current between activity and work thresholds
-- `hoursWorking` — current above work threshold
+- `hoursActive` — current above activity threshold, including working time
+- `hoursWorking` — current above work threshold; subset of active time
 
 A maintenance reminder system stores up to 20 user-defined items in NVS.
 Each item tracks elapsed hours (or days, or BMS cycles) against a user-set
@@ -100,6 +100,10 @@ interval, with a confirmation workflow to log when maintenance is performed.
 Firmware 0.3.0 also stores per-item completion history in NVS and uses a 256 KB
 default NVS partition at `0xa10000`; installing that partition table requires a
 full USB/fresh flash from older releases.
+
+The `/maintenance` page shows hour bars first, then machine/project notes, then
+maintenance cards. Completion history entries can be edited for date and notes
+or deleted per item.
 
 BMS degradation metrics (cycle count, capacity fade, lifetime extremes, event
 counts) are tracked from BMS telemetry and local observation.

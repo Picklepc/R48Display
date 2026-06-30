@@ -73,7 +73,18 @@ struct Snapshot {
   uint32_t themeBad = 0xFF4D4D;
 };
 
+struct TouchState {
+  bool pressed = false;
+  uint16_t x = 0;
+  uint16_t y = 0;
+  uint8_t gesture = 0;
+};
+
+using TouchReadCallback = bool (*)(TouchState &state);
+
 void begin(Arduino_GFX *display);
+void setTouchReader(TouchReadCallback callback);
+int8_t consumePageDelta();
 void draw(const Snapshot &s);
 void tick(bool sleeping = false);
 

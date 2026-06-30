@@ -13,6 +13,8 @@ namespace {
 constexpr uint16_t WIDTH = DISPLAY_WIDTH;
 constexpr uint16_t HEIGHT = DISPLAY_HEIGHT;
 constexpr uint32_t LV_HANDLER_MS = 16;
+constexpr int16_t SWIPE_MIN_PX = 55;
+constexpr int16_t SWIPE_AXIS_BIAS_PX = 18;
 
 constexpr uint32_t COL_BG = 0x050605;
 constexpr uint32_t COL_PANEL = 0x10170D;
@@ -38,7 +40,14 @@ uint32_t lastHandlerMs = 0;
 
 lv_disp_draw_buf_t drawBuf;
 lv_disp_drv_t dispDrv;
+lv_indev_drv_t indevDrv;
+lv_disp_t *dispHandle = nullptr;
 static lv_color_t buf1[WIDTH * 24];
+TouchReadCallback touchReadCallback = nullptr;
+lv_point_t lastTouchPoint = {0, 0};
+lv_point_t touchStartPoint = {0, 0};
+bool touchWasPressed = false;
+int8_t pendingPageDelta = 0;
 
 struct UiTheme {
   uint32_t bg = COL_BG;
@@ -149,6 +158,38 @@ void flushCb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *colorP) {
   const uint32_t drawH = area->y2 - area->y1 + 1;
   gfx->draw16bitRGBBitmap(area->x1, area->y1, reinterpret_cast<uint16_t *>(&colorP->full), drawW, drawH);
   lv_disp_flush_ready(disp);
+}
+
+void touchCb(lv_indev_drv_t *, lv_indev_data_t *data) {
+  TouchState state;
+  const bool ok = touchReadCallback && touchReadCallback(state);
+  if (ok && state.pressed) {
+    if (state.gesture == 0x03) pendingPageDelta = 1;
+    else if (state.gesture == 0x04) pendingPageDelta = -1;
+    lastTouchPoint.x = static_cast<lv_coord_t>(state.x);
+    lastTouchPoint.y = static_cast<lv_coord_t>(state.y);
+    if (!touchWasPressed) {
+      touchStartPoint = lastTouchPoint;
+      touchWasPressed = true;
+    }
+    data->point = lastTouchPoint;
+    data->state = LV_INDEV_STATE_PR;
+  } else {
+    if (ok) {
+      if (state.gesture == 0x03) pendingPageDelta = 1;
+      else if (state.gesture == 0x04) pendingPageDelta = -1;
+    }
+    if (touchWasPressed) {
+      const int16_t dx = static_cast<int16_t>(lastTouchPoint.x - touchStartPoint.x);
+      const int16_t dy = static_cast<int16_t>(lastTouchPoint.y - touchStartPoint.y);
+      if (abs(dx) >= SWIPE_MIN_PX && abs(dx) > abs(dy) + SWIPE_AXIS_BIAS_PX) {
+        pendingPageDelta = dx < 0 ? 1 : -1;
+      }
+      touchWasPressed = false;
+    }
+    data->point = lastTouchPoint;
+    data->state = LV_INDEV_STATE_REL;
+  }
 }
 
 void clearHandles() {
@@ -513,10 +554,25 @@ void begin(Arduino_GFX *display) {
   dispDrv.ver_res = HEIGHT;
   dispDrv.draw_buf = &drawBuf;
   dispDrv.flush_cb = flushCb;
-  lv_disp_drv_register(&dispDrv);
+  dispHandle = lv_disp_drv_register(&dispDrv);
+  lv_indev_drv_init(&indevDrv);
+  indevDrv.type = LV_INDEV_TYPE_POINTER;
+  indevDrv.disp = dispHandle;
+  indevDrv.read_cb = touchCb;
+  lv_indev_drv_register(&indevDrv);
   lvReady = true;
   activePage = 255;
   lastTickMs = millis();
+}
+
+void setTouchReader(TouchReadCallback callback) {
+  touchReadCallback = callback;
+}
+
+int8_t consumePageDelta() {
+  const int8_t delta = pendingPageDelta;
+  pendingPageDelta = 0;
+  return delta;
 }
 
 void tick(bool sleeping) {

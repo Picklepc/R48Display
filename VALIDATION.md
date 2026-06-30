@@ -77,6 +77,9 @@ Pass / Fail      : _______________
 ## Section 4 — LCD Pages
 
 All four pages must be reachable by swiping left or right on the touchscreen.
+- [ ] A simple tap does not change pages while the display is awake.
+- [ ] Swipe direction follows the configured display rotation at 0, 90, 180,
+      and 270 degrees.
 
 **Dashboard (Page 0):**
 - [ ] SOC ring displays correct percentage from BMS.
@@ -200,6 +203,8 @@ Requires a device with the onboard LiPo circuit populated.
 - [ ] Hours increment during the correct state only (standby counter does not
       increment during active/working).
 - [ ] Web dashboard shows all four counters in the Hours card.
+- [ ] Maintenance page shows exactly two hour-meter bars at the top: total
+      displayed hours, then working / active / total hours.
 - [ ] `/api/maintenance` GET returns empty array on a clean device.
 - [ ] Create a maintenance item via POST. Item appears in GET with correct
       `elapsed`, `remaining`, and `pct` values.
@@ -208,8 +213,15 @@ Requires a device with the onboard LiPo circuit populated.
 - [ ] Mark Done accepts optional completion notes and stores a history entry.
 - [ ] Maintenance History expands for each item and shows the most recent
       completion records.
+- [ ] Maintenance history date and notes can be edited through
+      `/api/maintenance/history/update` and persist after reboot.
 - [ ] Maintenance CSV export downloads a file with item, type, interval,
       completion timestamp, value, and notes.
+- [ ] Machine / Project Notes saves manufacturer, model, serial/VIN,
+      manufacture date, gauge install date, battery model/install date,
+      freeform notes, and custom fields.
+- [ ] `/api/machine-info` GET returns the saved machine/project notes after
+      reboot.
 - [ ] `/api/maintenance/delete` POST removes item from list.
 - [ ] Overdue item (elapsed > interval) shows red indicator in web UI and
       increments the overdue badge on LCD Status page.

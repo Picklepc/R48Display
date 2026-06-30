@@ -331,6 +331,7 @@ struct TouchPoint {
   uint16_t x = 0;
   uint16_t y = 0;
   uint8_t gesture = 0;
+  bool pressed = false;
 };
 
 struct ButtonTracker {
@@ -422,6 +423,7 @@ ButtonTracker powerButton{static_cast<uint8_t>(PIN_BATTERY_KEY), "POWER", true};
 
 String escapeHtml(const String &input);
 void drawDisplay(bool fullRedraw = false);
+bool readDisplayTouch(R48DisplayUi::TouchState &state);
 void setupRoutes();
 void saveSettings();
 void saveHours();
@@ -751,6 +753,26 @@ struct MaintenanceHistoryEntry {
 
 static constexpr uint8_t MAINT_HISTORY_MAX = 10;
 std::map<uint8_t, std::vector<MaintenanceHistoryEntry>> maintHistory;
+
+struct MachineField {
+  String label;
+  String value;
+};
+
+struct MachineInfo {
+  String make;
+  String modelNumber;
+  String serialNumber;
+  String manufactureDate;
+  String gaugeInstallDate;
+  String batteryModel;
+  String batteryInstallDate;
+  String notes;
+  std::vector<MachineField> fields;
+};
+
+static constexpr uint8_t MACHINE_FIELD_MAX = 12;
+MachineInfo machineInfo;
 
 // Forward declarations — activityDetected/workDetected defined below
 bool activityDetected();
@@ -2113,6 +2135,100 @@ void clearMaintenanceHistoryFor(uint8_t id) {
   prefs.end();
 }
 
+String sanitizeInfoText(String value, size_t maxLen) {
+  value.trim();
+  if (value.length() > maxLen) value = value.substring(0, maxLen);
+  return value;
+}
+
+void loadMachineInfo() {
+  prefs.begin("r48disp", true);
+  const String json = prefs.getString("machine", "{}");
+  prefs.end();
+  JsonDocument doc;
+  if (deserializeJson(doc, json) != DeserializationError::Ok) return;
+  machineInfo.make = String(doc["make"] | "");
+  machineInfo.modelNumber = String(doc["model_number"] | "");
+  machineInfo.serialNumber = String(doc["serial_number"] | "");
+  machineInfo.manufactureDate = String(doc["manufacture_date"] | "");
+  machineInfo.gaugeInstallDate = String(doc["gauge_install_date"] | "");
+  machineInfo.batteryModel = String(doc["battery_model"] | "");
+  machineInfo.batteryInstallDate = String(doc["battery_install_date"] | "");
+  machineInfo.notes = String(doc["notes"] | "");
+  machineInfo.fields.clear();
+  for (JsonObject obj : doc["fields"].as<JsonArray>()) {
+    if (machineInfo.fields.size() >= MACHINE_FIELD_MAX) break;
+    MachineField field;
+    field.label = sanitizeInfoText(String(obj["label"] | ""), 32);
+    field.value = sanitizeInfoText(String(obj["value"] | ""), 80);
+    if (field.label.length() || field.value.length()) machineInfo.fields.push_back(field);
+  }
+}
+
+void addMachineInfoJson(JsonObject &root) {
+  root["make"] = machineInfo.make;
+  root["model_number"] = machineInfo.modelNumber;
+  root["serial_number"] = machineInfo.serialNumber;
+  root["manufacture_date"] = machineInfo.manufactureDate;
+  root["gauge_install_date"] = machineInfo.gaugeInstallDate;
+  root["battery_model"] = machineInfo.batteryModel;
+  root["battery_install_date"] = machineInfo.batteryInstallDate;
+  root["notes"] = machineInfo.notes;
+  JsonArray fields = root["fields"].to<JsonArray>();
+  for (const auto &field : machineInfo.fields) {
+    JsonObject obj = fields.add<JsonObject>();
+    obj["label"] = field.label;
+    obj["value"] = field.value;
+  }
+}
+
+void saveMachineInfo() {
+  JsonDocument doc;
+  JsonObject root = doc.to<JsonObject>();
+  addMachineInfoJson(root);
+  String out;
+  serializeJson(doc, out);
+  prefs.begin("r48disp", false);
+  prefs.putString("machine", out);
+  prefs.end();
+}
+
+void apiMachineInfoGet() {
+  JsonDocument doc;
+  JsonObject root = doc.to<JsonObject>();
+  addMachineInfoJson(root);
+  sendJson(doc);
+}
+
+void apiMachineInfoPost() {
+  machineInfo.make = sanitizeInfoText(server.arg("machine_make"), 40);
+  machineInfo.modelNumber = sanitizeInfoText(server.arg("machine_model"), 40);
+  machineInfo.serialNumber = sanitizeInfoText(server.arg("machine_serial"), 50);
+  machineInfo.manufactureDate = sanitizeInfoText(server.arg("machine_mfg_date"), 16);
+  machineInfo.gaugeInstallDate = sanitizeInfoText(server.arg("gauge_install_date"), 16);
+  machineInfo.batteryModel = sanitizeInfoText(server.arg("battery_model"), 50);
+  machineInfo.batteryInstallDate = sanitizeInfoText(server.arg("battery_install_date"), 16);
+  machineInfo.notes = sanitizeInfoText(server.arg("machine_notes"), 800);
+
+  machineInfo.fields.clear();
+  JsonDocument doc;
+  if (deserializeJson(doc, server.arg("fields_json")) == DeserializationError::Ok) {
+    for (JsonObject obj : doc.as<JsonArray>()) {
+      if (machineInfo.fields.size() >= MACHINE_FIELD_MAX) break;
+      MachineField field;
+      field.label = sanitizeInfoText(String(obj["label"] | ""), 32);
+      field.value = sanitizeInfoText(String(obj["value"] | ""), 80);
+      if (field.label.length() || field.value.length()) machineInfo.fields.push_back(field);
+    }
+  }
+
+  saveMachineInfo();
+  JsonDocument out;
+  JsonObject root = out.to<JsonObject>();
+  addMachineInfoJson(root);
+  sendJson(out);
+}
+
 float maintCurrentValue(const MaintenanceItem &item) {
   switch (item.type) {
     case MaintType::HoursTotal:   return settings.hoursBaseline + hoursTotal;
@@ -2275,6 +2391,48 @@ void apiMaintenanceHistoryDelete() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+void apiMaintenanceHistoryUpdate() {
+  const uint8_t id = static_cast<uint8_t>(server.arg("id").toInt());
+  const uint32_t originalTs = static_cast<uint32_t>(server.arg("original_ts").toInt());
+  const uint32_t newTs = static_cast<uint32_t>(server.arg("ts").toInt());
+  if (originalTs == 0 || newTs == 0) { server.send(400, "text/plain", "valid dates required"); return; }
+
+  MaintenanceItem *item = nullptr;
+  for (auto &it : maintenanceItems) if (it.id == id) { item = &it; break; }
+  if (!item) { server.send(404, "text/plain", "item not found"); return; }
+
+  loadMaintenanceHistoryFor(id);
+  auto &hist = maintHistory[id];
+  MaintenanceHistoryEntry *entry = nullptr;
+  for (auto &e : hist) {
+    if (e.ts == newTs && newTs != originalTs) {
+      server.send(409, "text/plain", "another entry already has that date");
+      return;
+    }
+    if (e.ts == originalTs) entry = &e;
+  }
+  if (!entry) { server.send(404, "text/plain", "entry not found"); return; }
+
+  entry->ts = newTs;
+  entry->notes = sanitizeInfoText(server.arg("notes"), 200);
+  std::sort(hist.begin(), hist.end(),
+    [](const MaintenanceHistoryEntry &a, const MaintenanceHistoryEntry &b) { return a.ts < b.ts; });
+
+  bool itemChanged = false;
+  if (item->lastResetTs == originalTs) {
+    item->lastResetTs = newTs;
+    itemChanged = true;
+  }
+  if (item->type == MaintType::Days && !hist.empty() && item->lastResetTs != hist.back().ts) {
+    item->lastResetTs = hist.back().ts;
+    itemChanged = true;
+  }
+
+  saveMaintenanceHistoryFor(id);
+  if (itemChanged) saveMaintenance();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 static String csvEscape(const String &s) {
   if (s.indexOf(',') < 0 && s.indexOf('"') < 0 && s.indexOf('\n') < 0) return s;
   String out = "\"";
@@ -2310,6 +2468,15 @@ void apiMaintenanceExport() {
 }
 
 // ── end Maintenance tracker ──────────────────────────────────────────────────
+
+void normalizeHourCounters() {
+  settings.hoursBaseline = max(0.0f, settings.hoursBaseline);
+  hoursTotal = max(0.0f, hoursTotal);
+  hoursStandby = min(max(0.0f, hoursStandby), hoursTotal);
+  const float displayedTotal = settings.hoursBaseline + hoursTotal;
+  hoursActive = min(max(0.0f, hoursActive), displayedTotal);
+  hoursWorking = min(max(0.0f, hoursWorking), hoursActive);
+}
 
 void loadSettings() {
   prefs.begin("r48disp", true);
@@ -2393,11 +2560,7 @@ void loadSettings() {
   if (settings.labelStandby.isEmpty()) settings.labelStandby = activeUsage().standbyMode;
   if (settings.labelActive.isEmpty()) settings.labelActive = activeUsage().activeMode;
   if (settings.labelWorking.isEmpty()) settings.labelWorking = activeUsage().workMode;
-  hoursTotal = max(0.0f, hoursTotal);
-  settings.hoursBaseline = max(0.0f, settings.hoursBaseline);
-  hoursStandby = max(0.0f, hoursStandby);
-  hoursActive = max(0.0f, hoursActive);
-  hoursWorking = max(0.0f, hoursWorking);
+  normalizeHourCounters();
   bool knownProtocol = false;
   for (const auto &profile : BMS_PROFILES) {
     if (settings.bmsProtocol == profile.id) knownProtocol = true;
@@ -2465,6 +2628,7 @@ void cleanupLegacyNvsKeys() {
 }
 
 void saveHours() {
+  normalizeHourCounters();
   prefs.begin("r48disp", false);
   prefs.putFloat("hrsTotal", hoursTotal);
   prefs.putFloat("hrsStby", hoursStandby);
@@ -2873,7 +3037,7 @@ void updateHours() {
     hoursTotal += deltaH;
     const ActivityState state = activityState();
     switch (state) {
-      case ActivityState::Working:  hoursWorking += deltaH; sessionActiveHours += deltaH; break;
+      case ActivityState::Working:  hoursActive += deltaH; hoursWorking += deltaH; sessionActiveHours += deltaH; break;
       case ActivityState::Active:   hoursActive += deltaH;  sessionActiveHours += deltaH; break;
       case ActivityState::Charging: /* charging time in total only */                      break;
       default:                      hoursStandby += deltaH;                                break;
@@ -2902,6 +3066,7 @@ void initDisplay() {
   if (displayReady) {
     applyDisplayRotation();
     R48DisplayUi::begin(gfx);
+    R48DisplayUi::setTouchReader(readDisplayTouch);
     gfx->fillScreen(COLOR_BG);
     gfx->setTextWrap(false);
     markDisplayActivity();
@@ -2920,6 +3085,7 @@ bool readTouch(TouchPoint &point) {
   const uint8_t yHigh = touchWire.read();
   const uint8_t yLow = touchWire.read();
   if (fingers == 0 && point.gesture == 0) return false;
+  point.pressed = fingers > 0;
   point.x = ((xHigh & 0x0F) << 8) | xLow;
   point.y = ((yHigh & 0x0F) << 8) | yLow;
   const uint16_t rawX = constrain(point.x, static_cast<uint16_t>(0), static_cast<uint16_t>(DISPLAY_WIDTH - 1));
@@ -2945,6 +3111,53 @@ bool readTouch(TouchPoint &point) {
   return true;
 }
 
+uint8_t touchGestureForRotation(uint8_t gesture) {
+  int8_t dx = 0;
+  int8_t dy = 0;
+  switch (gesture) {
+    case 0x01: dy = -1; break;  // up
+    case 0x02: dy = 1; break;   // down
+    case 0x03: dx = -1; break;  // left
+    case 0x04: dx = 1; break;   // right
+    default: return gesture;
+  }
+
+  int8_t screenDx = dx;
+  int8_t screenDy = dy;
+  switch (displayRotationStep()) {
+    case 1:
+      screenDx = dy;
+      screenDy = -dx;
+      break;
+    case 2:
+      screenDx = -dx;
+      screenDy = -dy;
+      break;
+    case 3:
+      screenDx = -dy;
+      screenDy = dx;
+      break;
+    default:
+      break;
+  }
+
+  if (abs(screenDx) > abs(screenDy)) return screenDx < 0 ? 0x03 : 0x04;
+  if (screenDy != 0) return screenDy < 0 ? 0x01 : 0x02;
+  return gesture;
+}
+
+bool readDisplayTouch(R48DisplayUi::TouchState &state) {
+  if (!displayReady || !touchReady || displaySleeping) return false;
+  TouchPoint point;
+  if (!readTouch(point)) return false;
+  state.pressed = point.pressed;
+  state.x = point.x;
+  state.y = point.y;
+  state.gesture = touchGestureForRotation(point.gesture);
+  if (state.pressed) markDisplayActivity();
+  return true;
+}
+
 void maybeProbeTouch() {
   if (touchReady || millis() - lastTouchProbeMs < 5000) return;
   lastTouchProbeMs = millis();
@@ -2954,13 +3167,12 @@ void maybeProbeTouch() {
 
 void maybeHandleTouch() {
   if (!displayReady || !touchReady) return;
-  const bool intLow = digitalRead(PIN_TOUCH_INT) == LOW;
-
-  if (millis() - lastTouchMs < 300) return;
-  if (!intLow) return;
-  TouchPoint p;
-  if (!readTouch(p)) return;
   if (displaySleeping) {
+    const bool intLow = digitalRead(PIN_TOUCH_INT) == LOW;
+    if (millis() - lastTouchMs < 300) return;
+    if (!intLow) return;
+    TouchPoint p;
+    if (!readTouch(p)) return;
     const uint32_t now = millis();
     const bool doubleTapGesture = p.gesture == 0x0B;
     const bool softwareDoubleTap = lastSleepTapMs > 0 && now - lastSleepTapMs <= TOUCH_DOUBLE_TAP_MS;
@@ -2973,10 +3185,12 @@ void maybeHandleTouch() {
     }
     return;
   }
+
+  const int8_t pageDelta = R48DisplayUi::consumePageDelta();
+  if (pageDelta == 0) return;
   markDisplayActivity();
-  if (p.gesture == 0x03) displayPage = (displayPage + 1) % R48DisplayUi::PAGE_COUNT;
-  else if (p.gesture == 0x04) displayPage = (displayPage + R48DisplayUi::PAGE_COUNT - 1) % R48DisplayUi::PAGE_COUNT;
-  else displayPage = (displayPage + 1) % R48DisplayUi::PAGE_COUNT;
+  if (pageDelta > 0) displayPage = (displayPage + 1) % R48DisplayUi::PAGE_COUNT;
+  else displayPage = (displayPage + R48DisplayUi::PAGE_COUNT - 1) % R48DisplayUi::PAGE_COUNT;
   lastTouchMs = millis();
   drawDisplay(true);
 }
@@ -3209,10 +3423,10 @@ String themeCss() {
   css += F("--font:system-ui,-apple-system,Segoe UI,sans-serif}"
            "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh}header{position:sticky;top:0;z-index:3;background:var(--bg);border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;justify-content:space-between;padding:12px 16px}"
            "h1,h2,h3,p{margin:0}h1{font-size:20px;color:var(--primary)}header p{color:var(--muted);font-size:12px;margin-top:2px}.brand{display:flex;gap:10px;align-items:center}.mark{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--primary),var(--accent));display:block}"
-           "nav{display:flex;gap:8px;flex-wrap:wrap}a,button,input,select{font:inherit}nav a,button{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:8px 11px;text-decoration:none;cursor:pointer}button.primary{background:var(--primary);border-color:var(--primary);color:var(--buttonText);font-weight:800}button.btn-danger{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:700}"
+           "nav{display:flex;gap:8px;flex-wrap:wrap}a,button,input,select,textarea{font:inherit}nav a,button{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:8px 11px;text-decoration:none;cursor:pointer}button.primary{background:var(--primary);border-color:var(--primary);color:var(--buttonText);font-weight:800}button.btn-danger{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:700}"
            ".wrap{max-width:1180px;margin:0 auto;padding:18px;display:grid;gap:16px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.grid,.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.wide{grid-column:1/-1}.card,.metric,.gauge-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.metric{min-height:104px}.label{color:var(--muted);font-size:13px}.value{font-size:30px;margin-top:6px}.value.sm{font-size:20px;line-height:1.3}.subline{color:var(--muted);text-align:center;margin-top:12px}"
            ".gauge-card{display:grid;place-items:center}.gauge{width:min(60vw,230px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;position:relative;background:conic-gradient(from 135deg,var(--primary) calc(var(--pct)*0.75%),var(--line) 0 75%,transparent 75%)}.gauge:before{content:'';position:absolute;inset:22px;border-radius:50%;background:var(--panel)}.gauge b{position:relative;font-size:42px;font-weight:700;color:var(--primary)}"
-           ".section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}label{display:grid;gap:6px;color:var(--muted);font-size:13px}label.check{display:flex;align-items:center;gap:8px;color:var(--text)}label.check input{width:auto}.hint{color:var(--muted);font-size:12px;line-height:1.35}input,select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}"
+           ".section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}label{display:grid;gap:6px;color:var(--muted);font-size:13px}label.check{display:flex;align-items:center;gap:8px;color:var(--text)}label.check input{width:auto}.hint{color:var(--muted);font-size:12px;line-height:1.35}input,select,textarea{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px}textarea{resize:vertical}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}"
            ".cells{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px}.cell{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:9px;display:grid;gap:6px}.cell span{color:var(--muted);font-size:12px}.cell b{font-size:18px}.cell i{display:block;height:6px;border-radius:6px;background:linear-gradient(90deg,var(--primary2),var(--primary));width:var(--w)}.list{display:grid;gap:8px}.list button{display:flex;justify-content:space-between;text-align:left}.list span{color:var(--muted)}.empty,.note{color:var(--muted);line-height:1.45}table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:500}.bms-pack{display:grid;grid-template-columns:minmax(190px,270px) 1fr;gap:12px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.pack-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}@media(max-width:760px){header{align-items:flex-start;flex-direction:column}.bms-pack{grid-template-columns:1fr}}");
   css += F(
       ".dashboard-panel{display:grid;grid-template-columns:minmax(190px,270px) 1fr;gap:14px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;overflow:hidden}"
@@ -3908,12 +4122,15 @@ void setupRoutes() {
   server.on("/api/display/page", HTTP_POST, apiDisplayPage);
   server.on("/api/reboot", HTTP_POST, apiReboot);
   server.on("/api/battery/off", HTTP_POST, apiBatteryOff);
+  server.on("/api/machine-info", HTTP_GET, apiMachineInfoGet);
+  server.on("/api/machine-info", HTTP_POST, apiMachineInfoPost);
   server.on("/api/maintenance", HTTP_GET, apiMaintenanceGet);
   server.on("/api/maintenance", HTTP_POST, apiMaintenancePost);
   server.on("/api/maintenance/confirm", HTTP_POST, apiMaintenanceConfirm);
   server.on("/api/maintenance/delete", HTTP_POST, apiMaintenanceDelete);
   server.on("/api/maintenance/history", HTTP_GET, apiMaintenanceHistoryGet);
   server.on("/api/maintenance/history/delete", HTTP_POST, apiMaintenanceHistoryDelete);
+  server.on("/api/maintenance/history/update", HTTP_POST, apiMaintenanceHistoryUpdate);
   server.on("/api/maintenance/export", HTTP_GET, apiMaintenanceExport);
   server.on("/api/mqtt/publish-now", HTTP_POST, apiMqttPublishNow);
   server.on("/api/mqtt/rediscover", HTTP_POST, apiMqttRediscover);
@@ -3978,6 +4195,7 @@ void setup() {
   setupMqtt();
   loadDegradation();
   loadMaintenance();
+  loadMachineInfo();
   initDefaultMaintenanceItems();
   loadBmsCache();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);

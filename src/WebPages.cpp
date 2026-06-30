@@ -262,8 +262,8 @@ String settingsBody() {
       "<h3>Hour Meter</h3>"
       "<p class='hint' style='margin-bottom:10px'>"
       "<b>Total Hours</b> = Baseline + Counted. "
-      "<b>Active Hours</b> counts time above the Active amps threshold (driving, idling under load). "
-      "<b>Working Hours</b> counts time above the Working/surge threshold (blades on, high-draw tasks). "
+      "<b>Active Hours</b> counts all time above the Active amps threshold, including Working time. "
+      "<b>Working Hours</b> counts the high-draw subset above the Working/surge threshold. "
       "All counters increment only while BMS data is live. Edit to correct or reset; saving immediately persists."
       "</p>"
       "<div class='form-grid'>"
@@ -277,10 +277,10 @@ String settingsBody() {
       "<span class='hint'>Accumulated by this device since first boot. Read-only.</span>"
       "<input name='hours_counted' readonly></label>"
       "<label>Active Hours"
-      "<span class='hint'>Time spent above the Active amps threshold. Edit to reset (set 0) or correct.</span>"
+      "<span class='hint'>Time spent above the Active amps threshold, including Working time. Edit to reset or correct.</span>"
       "<input name='hours_active' type='number' min='0' max='99999' step='any'></label>"
       "<label>Working Hours"
-      "<span class='hint'>Time spent above the Working/surge threshold. Edit to reset or correct.</span>"
+      "<span class='hint'>High-draw subset of Active Hours. Edit to reset or correct.</span>"
       "<input name='hours_working' type='number' min='0' max='99999' step='any'></label>"
       "</div>"
       "</div>"
@@ -350,8 +350,35 @@ String maintenanceBody() {
       // Hours graph
       "<section class='card wide'>"
       "<h2>Hour Meter</h2>"
-      "<div id='hours-bar' style='display:flex;height:24px;border-radius:6px;overflow:hidden;background:var(--line);margin:10px 0 8px'></div>"
+      "<div id='hours-bars' style='display:grid;gap:10px;margin:10px 0 8px'></div>"
       "<div id='hours-legend' style='display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted)'>Loading\xe2\x80\xa6</div>"
+      "</section>"
+
+      // Machine / project notes
+      "<section class='card wide'>"
+      "<div class='section-head'><h2>Machine / Project Notes</h2>"
+      "<button class='primary' form='machine-form'>Save Notes</button></div>"
+      "<form id='machine-form'>"
+      "<div class='form-grid'>"
+      "<label>Manufacturer<input name='machine_make' maxlength='40' autocomplete='off' placeholder='Ryobi'></label>"
+      "<label>Model Number<input name='machine_model' maxlength='40' autocomplete='off' placeholder='RY48ZTR100 / RM480e / custom'></label>"
+      "<label>Serial / VIN<input name='machine_serial' maxlength='50' autocomplete='off'></label>"
+      "<label>Machine Manufacture Date<input name='machine_mfg_date' type='date'></label>"
+      "<label>Gauge Install Date<input name='gauge_install_date' type='date'></label>"
+      "<label>Battery / Pack Model<input name='battery_model' maxlength='50' autocomplete='off'></label>"
+      "<label>Battery Install Date<input name='battery_install_date' type='date'></label>"
+      "</div>"
+      "<div class='settings-group'>"
+      "<div class='section-head' style='margin-bottom:8px'><h3>Custom Fields</h3><button type='button' onclick='addMachineField()'>+ Field</button></div>"
+      "<div id='machine-fields' class='list'></div>"
+      "</div>"
+      "<div class='settings-group'>"
+      "<h3>Notes</h3>"
+      "<label>Installation notes, part numbers, service references, wiring notes"
+      "<textarea name='machine_notes' rows='5' maxlength='800' placeholder='Part numbers, conversion details, wiring notes, purchase dates, torque specs, etc.'></textarea></label>"
+      "</div>"
+      "<p id='machine-save-status' class='note' style='margin-top:10px'></p>"
+      "</form>"
       "</section>"
 
       // Maintenance list
@@ -398,6 +425,23 @@ String maintenanceBody() {
       "<div style='display:flex;gap:8px;margin-top:14px'>"
       "<button class='primary' onclick='submitConfirmMaint()'>Confirm Done</button>"
       "<button onclick='closeConfirmModal()'>Cancel</button>"
+      "</div></div></div>"
+
+      // Edit history modal
+      "<div id='maint-history-modal' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center'>"
+      "<div class='card' style='min-width:280px;max-width:420px;width:92%;padding:20px'>"
+      "<h3 style='margin-bottom:8px'>Edit History Entry</h3>"
+      "<div class='form-grid'>"
+      "<label>Completed At<input id='mh-date' type='datetime-local'></label>"
+      "<label>Completion notes"
+      "<textarea id='mh-notes' rows='4' maxlength='200' style='width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px;font:inherit;resize:vertical'></textarea>"
+      "</label>"
+      "</div>"
+      "<input type='hidden' id='mh-id' value='0'>"
+      "<input type='hidden' id='mh-original-ts' value='0'>"
+      "<div style='display:flex;gap:8px;margin-top:14px'>"
+      "<button class='primary' onclick='submitHistoryEdit()'>Save</button>"
+      "<button onclick='closeHistoryModal()'>Cancel</button>"
       "</div></div></div>");
 }
 
@@ -420,6 +464,8 @@ const qsa = (sel) => Array.from(document.querySelectorAll(sel));
 let themeOptions = [];
 let usageCategories = [];
 let _loadedHoursBaseline = 0;
+let machineFields = [];
+let maintHistoryEntries = {};
 
 function get(obj, path, fallback = '--') {
   return path.split('.').reduce((o, key) => (o && o[key] !== undefined) ? o[key] : undefined, obj) ?? fallback;
@@ -442,6 +488,10 @@ function postForm(url, data) {
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
     body: new URLSearchParams(data)
   });
+}
+
+function escAttr(value) {
+  return String(value ?? '').replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 }
 
 function chooseWifi(ssid) {
@@ -865,30 +915,134 @@ setInterval(refresh, 2500);
 const MAINT_TYPE_LABELS = {HOURS_ACTIVE:'Active Hours',HOURS_WORKING:'Working Hours',HOURS_TOTAL:'Total Hours',DAYS:'Days'};
 const MAINT_TYPE_UNIT   = {HOURS_ACTIVE:'h',HOURS_WORKING:'h',HOURS_TOTAL:'h',DAYS:'d'};
 
+function renderMachineFields(fields = machineFields) {
+  const host = $('machine-fields');
+  if (!host) return;
+  machineFields = Array.isArray(fields) ? fields : [];
+  if (!machineFields.length) {
+    host.innerHTML = "<div class='empty'>No custom fields yet. Add part numbers, tire sizes, controller info, charger model, or other project details.</div>";
+    return;
+  }
+  host.innerHTML = machineFields.map((f, i) => `
+    <div class='machine-field' style='display:grid;grid-template-columns:minmax(120px,.9fr) minmax(160px,1.4fr) auto;gap:8px;align-items:end'>
+      <label>Label<input class='mf-label' maxlength='32' value="${escAttr(f.label)}" autocomplete='off'></label>
+      <label>Value<input class='mf-value' maxlength='80' value="${escAttr(f.value)}" autocomplete='off'></label>
+      <button type='button' onclick='removeMachineField(${i})' style='color:var(--bad)'>Remove</button>
+    </div>
+  `).join('');
+}
+
+function addMachineField(label = '', value = '') {
+  if (machineFields.length >= 12) { alert('Maximum 12 custom fields'); return; }
+  machineFields.push({label, value});
+  renderMachineFields();
+}
+
+function removeMachineField(index) {
+  machineFields.splice(index, 1);
+  renderMachineFields();
+}
+
+function collectMachineFields() {
+  return qsa('#machine-fields .machine-field').map(row => ({
+    label: row.querySelector('.mf-label')?.value.trim() || '',
+    value: row.querySelector('.mf-value')?.value.trim() || '',
+  })).filter(f => f.label || f.value).slice(0, 12);
+}
+
+async function loadMachineInfo() {
+  const form = $('machine-form');
+  if (!form) return;
+  const data = await fetch('/api/machine-info',{cache:'no-store'}).then(r=>r.json()).catch(()=>null);
+  if (!data) return;
+  const map = {
+    machine_make: data.make,
+    machine_model: data.model_number,
+    machine_serial: data.serial_number,
+    machine_mfg_date: data.manufacture_date,
+    gauge_install_date: data.gauge_install_date,
+    battery_model: data.battery_model,
+    battery_install_date: data.battery_install_date,
+    machine_notes: data.notes,
+  };
+  Object.entries(map).forEach(([name, value]) => {
+    const el = form.elements[name];
+    if (el) el.value = value || '';
+  });
+  renderMachineFields(data.fields || []);
+}
+
+async function saveMachineInfo(ev) {
+  ev.preventDefault();
+  const form = ev.currentTarget;
+  const status = $('machine-save-status');
+  const payload = Object.fromEntries(new FormData(form).entries());
+  payload.fields_json = JSON.stringify(collectMachineFields());
+  const res = await postForm('/api/machine-info', payload);
+  if (!res.ok) {
+    const detail = await res.text();
+    if (status) status.textContent = detail || 'Save failed';
+    return;
+  }
+  const saved = await res.json().catch(()=>null);
+  renderMachineFields(saved?.fields || collectMachineFields());
+  if (status) status.textContent = 'Saved.';
+}
+
 async function loadMaintHours() {
   const data = await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()).catch(()=>null);
   const h = data?.hours || {};
-  const standby = parseFloat(h.standby)||0;
-  const active  = parseFloat(h.active)||0;
-  const working = parseFloat(h.working)||0;
-  const total   = standby + active + working;
-  const bar = $('hours-bar'), legend = $('hours-legend');
-  if (!bar || !legend) return;
+  const baseline = parseFloat(h.baseline)||0;
+  const counted = parseFloat(h.counted)||0;
+  const total = parseFloat(h.total)||Math.max(0, baseline + counted);
+  const activeRaw = parseFloat(h.active)||0;
+  const workingRaw = parseFloat(h.working)||0;
+  const active = Math.min(Math.max(activeRaw, 0), Math.max(total, 0));
+  const working = Math.min(Math.max(workingRaw, 0), Math.max(active, 0));
+  const bars = $('hours-bars'), legend = $('hours-legend');
+  if (!bars || !legend) return;
   if (total < 0.01) {
+    bars.innerHTML = '';
     legend.innerHTML = '<span>No hours recorded yet</span>';
     return;
   }
-  const segs = [
-    {label:'Standby', val:standby, color:'var(--muted)'},
-    {label:'Active',  val:active,  color:'var(--warn)'},
-    {label:'Working', val:working, color:'var(--bad)'},
-  ];
-  bar.innerHTML = segs.filter(s=>s.val>0).map(s =>
-    `<div title='${s.label}: ${s.val.toFixed(1)}h' style='width:${(s.val/total*100).toFixed(1)}%;background:${s.color};height:100%;transition:width .4s'></div>`
-  ).join('');
-  legend.innerHTML = [{label:'Total',val:total,color:'var(--text)'},...segs].map(s =>
-    `<span style='display:inline-flex;align-items:center;gap:4px'><span style='width:10px;height:10px;border-radius:2px;background:${s.color};flex-shrink:0'></span><b>${s.val.toFixed(1)}h</b>&nbsp;${s.label}</span>`
-  ).join('');
+  const fmt = v => `${(Number.isFinite(v) ? v : 0).toFixed(1)}h`;
+  const pct = (v, max) => max > 0 ? Math.max(0, Math.min(100, v / max * 100)) : 0;
+  const segment = (s, max) => s.val > 0.005
+    ? `<div title='${s.label}: ${fmt(s.val)}' style='width:${pct(s.val,max).toFixed(1)}%;background:${s.color};height:100%;transition:width .4s'></div>`
+    : '';
+  const row = (title, note, max, segs) => `
+    <div>
+      <div style='display:flex;justify-content:space-between;gap:8px;font-size:13px;margin-bottom:4px'>
+        <span>${title}</span><span style='color:var(--muted)'>${note}</span>
+      </div>
+      <div style='display:flex;height:18px;border-radius:6px;overflow:hidden;background:var(--line)'>
+        ${segs.map(s=>segment(s,max)).join('')}
+      </div>
+    </div>`;
+  bars.innerHTML = [
+    row('Total displayed hours', `${fmt(total)} = ${fmt(baseline)} install + ${fmt(counted)} tracked`, total, [
+      {label:'Original install', val:baseline, color:'var(--muted)'},
+      {label:'Tracked since install', val:Math.max(0, total - baseline), color:'var(--primary)'},
+    ]),
+    row('Working / Active / Total', `${fmt(workingRaw)} working / ${fmt(activeRaw)} active / ${fmt(total)} total`, total, [
+      {label:'Working', val:working, color:'var(--bad)'},
+      {label:'Active, not working', val:Math.max(0, active - working), color:'var(--warn)'},
+      {label:'Total, not active', val:Math.max(0, total - active), color:'var(--line)'},
+    ]),
+  ].join('');
+  const warnings = [];
+  if (activeRaw > total + 0.01) warnings.push('Active exceeds total; graph capped.');
+  if (workingRaw > activeRaw + 0.01) warnings.push('Working exceeds active; graph capped.');
+  legend.innerHTML = [
+    {label:'Total',val:total,color:'var(--text)'},
+    {label:'Install',val:baseline,color:'var(--muted)'},
+    {label:'Tracked',val:counted,color:'var(--primary)'},
+    {label:'Active',val:activeRaw,color:'var(--warn)'},
+    {label:'Working',val:workingRaw,color:'var(--bad)'},
+  ].map(s =>
+    `<span style='display:inline-flex;align-items:center;gap:4px'><span style='width:10px;height:10px;border-radius:2px;background:${s.color};flex-shrink:0'></span><b>${fmt(s.val)}</b>&nbsp;${s.label}</span>`
+  ).join('') + (warnings.length ? `<span style='color:var(--bad)'>${warnings.join(' ')}</span>` : '');
 }
 
 async function loadMaintenance() {
@@ -966,22 +1120,69 @@ async function loadItemHistory(id, panel) {
     panel.innerHTML = "<div class='empty' style='font-size:13px'>No history yet — use Mark Done to record a completion.</div>";
     return;
   }
+  maintHistoryEntries[id] = data.entries;
   const unit = MAINT_TYPE_UNIT[data.type]||'h';
-  const sorted = [...data.entries].reverse();
+  const sorted = [...data.entries].sort((a,b) => (parseInt(b.ts)||0) - (parseInt(a.ts)||0));
   panel.innerHTML = "<div style='border-top:1px solid var(--line);padding-top:8px'>" +
     sorted.map(e => {
       const date = e.ts > 0 ? new Date(e.ts*1000).toLocaleString() : 'Unknown date';
       return `<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px'>
         <div>
           <div>${date}</div>
-          ${e.notes ? `<div style='color:var(--muted);margin-top:2px'>${e.notes}</div>` : ''}
+          ${e.notes ? `<div style='color:var(--muted);margin-top:2px'>${escAttr(e.notes)}</div>` : ''}
         </div>
         <div style='display:flex;align-items:center;gap:8px;flex-shrink:0'>
           <span style='color:var(--muted);font-size:12px'>${parseFloat(e.val).toFixed(1)}${unit}</span>
+          <button onclick='openHistoryEdit(${id},${e.ts})' style='padding:4px 8px;font-size:12px'>Edit</button>
           <button onclick='deleteHistoryEntry(${id},${e.ts})' style='color:var(--bad);padding:4px 8px;font-size:12px'>✕</button>
         </div>
       </div>`;
     }).join('') + "</div>";
+}
+
+function datetimeLocalFromTs(ts) {
+  const d = new Date((parseInt(ts)||0) * 1000);
+  if (!Number.isFinite(d.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function epochFromDatetimeLocal(value) {
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
+}
+
+function openHistoryEdit(itemId, ts) {
+  const entry = (maintHistoryEntries[itemId] || []).find(e => parseInt(e.ts) === parseInt(ts));
+  if (!entry) { alert('History entry not found'); return; }
+  $('mh-id').value = itemId;
+  $('mh-original-ts').value = ts;
+  $('mh-date').value = datetimeLocalFromTs(ts);
+  $('mh-notes').value = entry.notes || '';
+  $('maint-history-modal').style.display = 'flex';
+  $('mh-date').focus();
+}
+
+function closeHistoryModal() { $('maint-history-modal').style.display = 'none'; }
+
+async function submitHistoryEdit() {
+  const itemId = $('mh-id').value;
+  const ts = epochFromDatetimeLocal($('mh-date').value);
+  if (!ts) { alert('Completion date is required'); return; }
+  const res = await postForm('/api/maintenance/history/update', {
+    id: itemId,
+    original_ts: $('mh-original-ts').value,
+    ts,
+    notes: $('mh-notes').value.trim()
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    alert(detail || 'Failed to update history entry');
+    return;
+  }
+  closeHistoryModal();
+  const panel = $('hist-' + itemId);
+  if (panel) await loadItemHistory(itemId, panel);
 }
 
 async function deleteHistoryEntry(itemId, ts) {
@@ -1032,7 +1233,12 @@ async function deleteMaint(id) {
   loadMaintenance();
 }
 
-if ($('maint-list')) { loadMaintHours(); loadMaintenance(); }
+if ($('maint-list')) {
+  loadMachineInfo();
+  $('machine-form')?.addEventListener('submit', saveMachineInfo);
+  loadMaintHours();
+  loadMaintenance();
+}
 )JS");
 }
 

@@ -20,11 +20,11 @@ For most use cases, users want to track:
   general maintenance schedules tied to calendar time on the machine).
 - **Standby hours** — powered on but no significant current draw (key-on
   while parked, system idle, battery float). Lowest wear on most components.
-- **Active hours** — current above the activity threshold but below the work
-  threshold. Mid-range load (driving a golf cart, running an inverter at low
-  load, trolling motor at cruise speed). Moderate component wear.
+- **Active hours** — current above the activity threshold, including time that
+  also crosses the work threshold. Moderate-to-high component wear.
 - **Working hours** — current above the work threshold. High load (mowing,
-  climbing hills, peak inverter load, surge draw). Highest wear.
+  climbing hills, peak inverter load, surge draw). Highest wear and always a
+  subset of active hours.
 
 This maps naturally onto the four activity states from `TASKS.md` M2.
 
@@ -34,12 +34,13 @@ This maps naturally onto the four activity states from `TASKS.md` M2.
 |---|---|---|
 | `hoursTotal` | `hrs_total` | Device is powered on (always) |
 | `hoursStandby` | `hrs_standby` | \|current\| < `activityAmps` AND not charging |
-| `hoursActive` | `hrs_active` | `activityAmps` ≤ discharge < `workAmps` |
-| `hoursWorking` | `hrs_working` | discharge ≥ `workAmps` |
+| `hoursActive` | `hrs_active` | discharge >= `activityAmps` |
+| `hoursWorking` | `hrs_working` | discharge >= `workAmps` |
 
 Note: charging time is counted in `hoursTotal` but not in any sub-category
-counter. This makes `hoursTotal` = `hoursStandby` + `hoursActive` +
-`hoursWorking` + `hoursCharging` (where charging is the remainder).
+counter. Working time is also active time, so the invariant is
+`hoursTotal >= hoursActive >= hoursWorking`. Idle/non-active time is the
+remainder after active time.
 
 Counters are stored as `float` (hours) in NVS. They are updated every 60 s by
 computing elapsed seconds since the last tick and converting to fractional hours
@@ -234,6 +235,22 @@ If provided, `notes` is stored in the item's history entry.
 
 Returns the 10 most recent completion records for one item.
 
+**POST `/api/maintenance/history/update`**
+
+Updates one history entry by `id` and `original_ts`. Body:
+
+```json
+{
+  "id": 1,
+  "original_ts": 1782867600,
+  "ts": 1782871200,
+  "notes": "Corrected completion date and notes"
+}
+```
+
+Returns `{"ok": true}`. Duplicate timestamps for the same item are rejected so
+future edit/delete operations can still target one row unambiguously.
+
 **POST `/api/maintenance/history/delete`**
 
 Removes a single history entry by `id` and `ts`. Returns `{"ok": true}`.
@@ -266,8 +283,41 @@ to clear them — DELETE is sufficient.
 ## Web UI — Maintenance Page
 
 The maintenance tracker lives at `/maintenance` (new web route). The page
-auto-refreshes progress every 30 s using the same polling mechanism as the
+starts with two hour-meter bars, followed by machine/project notes, then the
+maintenance item cards. Progress uses the same polling mechanism as the
 dashboard.
+
+### Hour Meter Bars
+
+The top card shows two bars:
+
+- **Total displayed hours**: installation baseline plus tracked device hours.
+- **Working / Active / Total**: working time, active non-working time, and the
+  remaining total/non-active time on one bar. Values are capped visually if a
+  stored counter is out of order, and a warning is shown.
+
+### Machine / Project Notes
+
+The second card on `/maintenance` stores machine and project reference data in
+NVS under the `machine` key. It is intended for Ryobi mower stats and equivalent
+project records:
+
+- Manufacturer
+- Model number
+- Serial / VIN
+- Machine manufacture date
+- Gauge install date
+- Battery / pack model
+- Battery install date
+- Up to 12 user-defined label/value fields
+- Freeform notes for part numbers, installation notes, wiring notes, service
+  references, or other details
+
+APIs:
+
+- **GET `/api/machine-info`** returns the saved record.
+- **POST `/api/machine-info`** saves form fields and a JSON `fields_json` array
+  for custom fields.
 
 ### Layout
 
