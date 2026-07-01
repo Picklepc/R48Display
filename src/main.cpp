@@ -216,7 +216,7 @@ constexpr ThemeProfile THEME_PROFILES[] = {
      Anim::Leaves,
      0x100800, 0x1E1004, 0x2E1A06, 0x6B3D10,
      0xFFF5DC, 0xC8A06A, 0xFF8C00, 0xC05C00, 0x8FB870, 0xFFD700, 0xFF4444, 0x100800},
-    {"christmas", "Jingle Volts", "holiday",
+    {"christmas", "Jingle All The Way", "holiday",
      "Classic Christmas red and green with gold ornament accents.",
      Anim::Snow,
      0x010A04, 0x05180A, 0x082B10, 0x144D22,
@@ -3413,6 +3413,8 @@ void drawDisplay(bool fullRedraw) {
   s.advertiseApCreds = settings.advertiseApCredentials;
   s.animType = settings.animType <= 15 ? settings.animType : activeTheme().animType;
   s.animEnabled = settings.animEnabled;
+  static uint8_t lastAnimType = 255;
+  if (s.animType != lastAnimType) { s.fullRedraw = true; lastAnimType = s.animType; }
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;

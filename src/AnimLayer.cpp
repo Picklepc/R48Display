@@ -83,13 +83,13 @@ static void buildFlag(lv_obj_t *root) {
     lv_obj_set_style_bg_opa(o, opa, 0);
   };
   for (uint8_t i = 0; i < 13; ++i)
-    mkobj(FX, FY + i * SH, FW, i == 12 ? FH - 12 * SH : SH, sc[i], 200, 0);
+    mkobj(FX, FY + i * SH, FW, i == 12 ? FH - 12 * SH : SH, sc[i], i % 2 == 0 ? 110 : 60, 0);
   // Canton — upper-left, 2/5 wide × 7 stripes tall (144×189)
   constexpr int16_t CW = FW * 2 / 5, CH = SH * 7;
-  mkobj(FX, FY, CW, CH, 0x0A3161, 240, 0);
+  mkobj(FX, FY, CW, CH, 0x0A3161, 130, 0);
   // Stars — 5×4 grid = 20 stars
   for (uint8_t i = 0; i < 20; ++i)
-    mkobj(FX + 8 + (i % 5) * 26, FY + 12 + (i / 5) * 54, 5, 5, 0xFFFFFF, 255, LV_RADIUS_CIRCLE);
+    mkobj(FX + 8 + (i % 5) * 26, FY + 12 + (i / 5) * 54, 5, 5, 0xFFFFFF, 190, LV_RADIUS_CIRCLE);
 }
 
 // ─── Spawners — each returns ms until next event ─────────────────────────────

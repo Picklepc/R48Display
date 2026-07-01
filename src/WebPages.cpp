@@ -896,6 +896,9 @@ function wireActions() {
     updateAnimForTheme(e.target.value);
     postForm('/api/settings', {theme_id: e.target.value}).then(() => refreshThemeCss());
   });
+  document.getElementById('anim-type-select')?.addEventListener('change', e => {
+    postForm('/api/settings', {anim_type: e.target.value, anim_enabled: '1'});
+  });
   let brightnessTimer = null;
   document.querySelector('[name=brightness]')?.addEventListener('input', e => {
     clearTimeout(brightnessTimer);
