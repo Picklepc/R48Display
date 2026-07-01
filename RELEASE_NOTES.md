@@ -1,3 +1,33 @@
+# R48Display v0.3.2 — Release Notes
+
+**OTA from 0.3.0 or 0.3.1 is safe** — partition table is unchanged.
+
+## What's New in 0.3.2
+
+### Animation / Screensaver System
+
+- New `AnimLayer` module (`src/AnimLayer.cpp`, `include/AnimLayer.h`) — a 64-particle LVGL object pool allocated once per page build, z-layered behind all dashboard widgets so text and gauges always render on top.
+- **15 animation types:** Stars, Embers, Lightning, Ripple, Speed Lines, Rave, Pixel Rain, Geometry, Flag + Fireworks, Bats, Snow, Leaves, Hearts, Grass, Fireworks.
+- Each theme declares a paired default animation via `ThemeProfile.animType`. Changing themes in the web UI auto-resets the animation to the new theme's default; users can then override.
+- Physics step runs at ~30 fps; LVGL's dirty-rectangle system repaints only moved particles, keeping UI widgets sharp.
+- Full-screen US flag for the 'Murica theme (360×360, 13 stripes, 5×4 star grid, semi-transparent so the dashboard remains readable). Fireworks burst over the flag using correct LVGL z-order.
+
+### Themes — 15 Total, Renamed and Reordered
+
+- **8 utility themes** (always available): Chlorophyll Shift, Redline Charge, Violet Voltage, Blue Fairway, Orange Ignition, Pixel Fairway, Modern Graphite, Fabulous!
+- **7 seasonal themes** (calendar order): Be Mine (Feb), 'Murica (Jul), Starfield, Ghouls & Goblins (Oct), Turkey Trot (Nov), Jingle All The Way (Dec), Countdown (Dec 31).
+- Theme dropdown now shows label only — the `(family)` parenthetical has been removed.
+- `/api/themes` response now includes `anim_type` per theme.
+
+### Animation Settings
+
+- `animEnabled` (NVS key `animOn`, default **off**) — global on/off switch.
+- `animType` (NVS key `animTyp`, 0–15; 255 = use theme default) — per-user animation override. Persists across reboots.
+- Web UI: checking the **Background animations enabled** checkbox reveals an **Animation Style** dropdown. Selecting a style applies it immediately (live preview, same as the theme selector). Changing the theme resets the dropdown to that theme's paired animation.
+- `/api/settings` GET returns `anim_enabled` and `anim_type`; POST accepts both independently.
+
+---
+
 # R48Display v0.3.1 — Release Notes
 
 ## ⚠️ Fresh Install Required When Upgrading from Any Version Prior to 0.3.x

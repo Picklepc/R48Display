@@ -461,6 +461,35 @@ Post-release incremental fixes shipped in v0.2.1 through v0.2.3.
 
 ---
 
+## Milestone 9 — Animation / Screensaver System (v0.3.2)
+
+- [x] **M9-01** `AnimLayer` module (`src/AnimLayer.cpp`, `include/AnimLayer.h`).
+      64-particle LVGL object pool allocated once per page build. `Anim::` constants
+      0–15: None, Stars, Embers, Lightning, Ripple, SpeedLines, Rave, PixelRain,
+      Geometry, FireworksFlag, Bats, Snow, Leaves, Hearts, Grass, Fireworks.
+      Public API: `build(root, animType, enabled)`, `step(nowMs)`, `setEnabled(bool)`.
+- [x] **M9-02** `ThemeProfile` struct gains `uint8_t animType` — each theme declares
+      its paired default animation. All 15 themes wired.
+- [x] **M9-03** `AppSettings` gains `animEnabled` (default false, NVS `animOn`) and
+      `animType` (default 255 = use theme default, NVS `animTyp`). Both persisted via
+      `loadSettings()` / `saveSettings()`.
+- [x] **M9-04** `drawDisplay()` resolves effective animType (override vs. theme default)
+      and detects type changes to force a full LVGL page rebuild.
+- [x] **M9-05** 7 seasonal themes added and all 15 themes given unique names:
+      Be Mine, 'Murica, Starfield, Ghouls & Goblins, Turkey Trot, Jingle All The Way,
+      Countdown. Reordered: 8 utility themes first, then 7 seasonal in calendar order.
+- [x] **M9-06** Full-screen 'Murica flag (360×360) with semi-transparent stripes (red
+      opa 110, white opa 60), canton opa 130, 5×4 star grid. Flag built before particle
+      pool so fireworks render on top.
+- [x] **M9-07** `/api/themes` returns `anim_type` per theme. `/api/settings` GET
+      returns `anim_type` and `anim_enabled`; POST accepts both independently.
+- [x] **M9-08** Web UI: `animEnabled` checkbox reveals `#anim-options` div with
+      `anim_type` select (16 options). Selecting a style immediately POSTs and updates
+      the display. Theme change resets the dropdown to the new theme's default animation.
+      Theme labels no longer include the `(family)` parenthetical.
+
+---
+
 ## Backlog (Post-v1.0.0)
 
 These are desirable but explicitly out of scope for the initial stable release.
