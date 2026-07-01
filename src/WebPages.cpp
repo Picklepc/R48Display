@@ -232,7 +232,27 @@ String settingsBody() {
       "<option value='270'>270&deg;</option>"
       "</select></label>"
       "<label class='check'><input name='display_enabled' type='checkbox'> Display enabled</label>"
-      "<label class='check'><input name='anim_enabled' type='checkbox'> Background animations enabled</label>"
+      "<label class='check'><input name='anim_enabled' id='animEnabledCb' type='checkbox' onchange='toggleAnimOptions(this.checked)'> Background animations enabled</label>"
+      "<div id='anim-options' style='display:none;margin-top:4px'>"
+      "<label>Animation Style<select name='anim_type' id='anim-type-select'>"
+      "<option value='0'>None</option>"
+      "<option value='1'>Stars</option>"
+      "<option value='2'>Embers</option>"
+      "<option value='3'>Lightning</option>"
+      "<option value='4'>Ripple</option>"
+      "<option value='5'>Speed Lines</option>"
+      "<option value='6'>Rave</option>"
+      "<option value='7'>Pixel Rain</option>"
+      "<option value='8'>Geometry</option>"
+      "<option value='9'>Flag + Fireworks</option>"
+      "<option value='10'>Bats</option>"
+      "<option value='11'>Snow</option>"
+      "<option value='12'>Leaves</option>"
+      "<option value='13'>Hearts</option>"
+      "<option value='14'>Grass</option>"
+      "<option value='15'>Fireworks</option>"
+      "</select></label>"
+      "</div>"
       "</div>"
       "</div>"
 
@@ -518,12 +538,19 @@ function updateThemeDescription() {
   const description = $('theme-description');
   if (description) description.textContent = theme ? `${theme.family}: ${theme.description}` : '';
 }
+function updateAnimForTheme(themeId) {
+  const sel = document.getElementById('anim-type-select');
+  if (!sel) return;
+  const t = themeOptions.find(t => t.id === themeId);
+  if (t != null && t.anim_type != null) sel.value = String(t.anim_type);
+}
 
 function applyCategoryTheme() {
   const usage = selectedUsage();
   const themeSelect = $('theme-select');
   if (usage && themeSelect && usage.default_theme) themeSelect.value = usage.default_theme;
   updateThemeDescription();
+  updateAnimForTheme(themeSelect?.value);
 }
 
 function refreshThemeCss() {
@@ -742,7 +769,7 @@ async function loadThemes() {
   const res = await fetch('/api/themes');
   const data = await res.json();
   themeOptions = data.themes || [];
-  select.innerHTML = themeOptions.map(t => `<option value="${t.id}">${t.label} (${t.family})</option>`).join('');
+  select.innerHTML = themeOptions.map(t => `<option value="${t.id}">${t.label}</option>`).join('');
   updateThemeDescription();
 }
 
@@ -769,6 +796,8 @@ async function loadSettings() {
   _loadedHoursBaseline = parseFloat(data.hours_baseline || '0');
   const battCb = document.getElementById('battEnCb');
   if (battCb) toggleBattOptions(battCb.checked);
+  const animCb = document.getElementById('animEnabledCb');
+  if (animCb) toggleAnimOptions(animCb.checked);
   updateThemeDescription();
 }
 
@@ -810,6 +839,10 @@ async function scanBle() {
 
 function toggleBattOptions(on) {
   const el = document.getElementById('batt-options');
+  if (el) el.style.display = on ? '' : 'none';
+}
+function toggleAnimOptions(on) {
+  const el = document.getElementById('anim-options');
   if (el) el.style.display = on ? '' : 'none';
 }
 async function batteryOff() {
@@ -860,6 +893,7 @@ function wireActions() {
   $('usage-category')?.addEventListener('change', applyCategoryTheme);
   $('theme-select')?.addEventListener('change', e => {
     updateThemeDescription();
+    updateAnimForTheme(e.target.value);
     postForm('/api/settings', {theme_id: e.target.value}).then(() => refreshThemeCss());
   });
   let brightnessTimer = null;
@@ -884,6 +918,7 @@ function wireActions() {
     data.mqtt_enabled = form.elements.mqtt_enabled.checked ? '1' : '0';
     data.advertise_ap_credentials = form.elements.advertise_ap_credentials.checked ? '1' : '0';
     data.anim_enabled = form.elements.anim_enabled.checked ? '1' : '0';
+    data.anim_type = form.elements.anim_type ? form.elements.anim_type.value : '0';
     delete data.standby_hint;
     delete data.hours_counted;
     // Only send hours_baseline if the user actually changed it; otherwise let
@@ -909,6 +944,8 @@ loadSettings().then(() => {
   if (mqttCb) toggleMqtt(mqttCb.checked);
   const battCb = document.getElementById('battEnCb');
   if (battCb) toggleBattOptions(battCb.checked);
+  const animCb = document.getElementById('animEnabledCb');
+  if (animCb) toggleAnimOptions(animCb.checked);
 });
 refresh();
 setInterval(refresh, 2500);

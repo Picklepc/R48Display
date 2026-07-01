@@ -65,13 +65,13 @@ static void spawn(float x, float y, float vx, float vy,
 
 // ─── Static flag ('Murica) ──────────────────────────────────────────────────
 static void buildFlag(lv_obj_t *root) {
-  constexpr int16_t FW = 80, FH = 52, SH = FH / 13;
-  constexpr int16_t FX = W - FW - 10, FY = H - FH - 10;
+  constexpr int16_t FW = W, FH = H, SH = FH / 13;  // full 360×360, 27px stripes
+  constexpr int16_t FX = 0, FY = 0;
   constexpr uint32_t sc[13] = {
     0xFF0000,0xFFFFFF,0xFF0000,0xFFFFFF,0xFF0000,0xFFFFFF,0xFF0000,
     0xFFFFFF,0xFF0000,0xFFFFFF,0xFF0000,0xFFFFFF,0xFF0000
   };
-  auto mkobj = [&](int16_t x, int16_t y, int16_t w, int16_t h, uint32_t col, uint8_t opa, uint8_t r) {
+  auto mkobj = [&](int16_t x, int16_t y, int16_t w, int16_t h, uint32_t col, uint8_t opa, int16_t r) {
     lv_obj_t *o = lv_obj_create(root);
     lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_border_width(o, 0, 0);
@@ -83,15 +83,13 @@ static void buildFlag(lv_obj_t *root) {
     lv_obj_set_style_bg_opa(o, opa, 0);
   };
   for (uint8_t i = 0; i < 13; ++i)
-    mkobj(FX, FY + i * SH, FW, i == 12 ? FH - 12 * SH : SH, sc[i], 150, 0);
-  // Canton
-  constexpr int16_t CW = FW * 4 / 10, CH = SH * 7;
-  mkobj(FX, FY, CW, CH, 0x0A3161, 200, 0);
-  // Stars (4×3 grid)
-  constexpr int16_t SX0 = FX + 3, SY0 = FY + 3;
-  constexpr int16_t SGX = (CW - 6) / 3, SGY = (CH - 6) / 2;
-  for (uint8_t i = 0; i < 12; ++i)
-    mkobj(SX0 + (i % 4) * SGX, SY0 + (i / 4) * SGY, 2, 2, 0xFFFFFF, 255, LV_RADIUS_CIRCLE);
+    mkobj(FX, FY + i * SH, FW, i == 12 ? FH - 12 * SH : SH, sc[i], 200, 0);
+  // Canton — upper-left, 2/5 wide × 7 stripes tall (144×189)
+  constexpr int16_t CW = FW * 2 / 5, CH = SH * 7;
+  mkobj(FX, FY, CW, CH, 0x0A3161, 240, 0);
+  // Stars — 5×4 grid = 20 stars
+  for (uint8_t i = 0; i < 20; ++i)
+    mkobj(FX + 8 + (i % 5) * 26, FY + 12 + (i / 5) * 54, 5, 5, 0xFFFFFF, 255, LV_RADIUS_CIRCLE);
 }
 
 // ─── Spawners — each returns ms until next event ─────────────────────────────
@@ -105,11 +103,11 @@ static uint32_t evtStars() {
 
 static uint32_t evtEmbers() {
   constexpr uint32_t p[] = {0xFF6600,0xFF9900,0xFFCC00,0xFF3300,0xFF5500};
-  uint8_t n = 2 + r32() % 3;
+  uint8_t n = 3 + r32() % 6;
   for (uint8_t i = 0; i < n; ++i)
-    spawn(rf(80,280), rf(240,310), rc(0,25), rf(-90,-28),
-          rf(1.8f,3.5f), p[r32()%5], 2+r32()%2);
-  return 380 + r32() % 560;
+    spawn(rf(60,300), rf(220,330), rc(0,30), rf(-120,-35),
+          rf(2.5f,5.5f), p[r32()%5], 3+r32()%3);
+  return 150 + r32() % 300;
 }
 
 static uint32_t evtLightning() {
@@ -239,10 +237,10 @@ static uint32_t evtLeaves() {
 
 static uint32_t evtHearts() {
   constexpr uint32_t p[] = {0xFF1493,0xFF69B4,0xFF0055,0xFF88CC,0xFF3366};
-  uint8_t n = 1 + r32() % 2;
+  uint8_t n = 1 + r32() % 3;
   for (uint8_t i = 0; i < n; ++i)
-    spawn(rf(40,W-40), H+4, rc(0,20), rf(-68,-26), rf(4.0f,7.0f), p[r32()%5], 5+r32()%3);
-  return 1100 + r32() % 2100;
+    spawn(rf(30,W-30), H+10, rc(0,22), rf(-75,-30), rf(4.5f,8.5f), p[r32()%5], 14+r32()%8);
+  return 900 + r32() % 1800;
 }
 
 static uint32_t evtGrass() {
@@ -362,6 +360,8 @@ void build(lv_obj_t *root, uint8_t animType, bool enabled) {
 
   if (animType == Anim::None || !root) return;
 
+  if (animType == Anim::FireworksFlag) buildFlag(root);  // behind pool dots
+
   for (auto &d : pool) {
     d.o = lv_obj_create(root);
     lv_obj_clear_flag(d.o, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
@@ -372,8 +372,6 @@ void build(lv_obj_t *root, uint8_t animType, bool enabled) {
     lv_obj_set_size(d.o, 4, 4);
     lv_obj_set_style_radius(d.o, 2, 0);
   }
-
-  if (animType == Anim::FireworksFlag) buildFlag(root);
 }
 
 void step(uint32_t now) {
