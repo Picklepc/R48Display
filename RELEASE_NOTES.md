@@ -1,25 +1,57 @@
-# R48Display v0.3.0 — Release Notes
+# R48Display v0.3.1 — Release Notes
 
-## What's New in 0.3.0
+## ⚠️ Fresh Install Required When Upgrading from Any Version Prior to 0.3.x
 
-### NVS Partition Expansion
-- Default NVS storage is now 256 KB instead of the ESP-IDF default 20 KB. This gives room for settings, hour counters, cached BMS data, degradation metrics, maintenance items, and maintenance completion history.
-- The enlarged NVS partition lives after the two OTA app slots at `0xa10000`. `otadata` remains at `0xe000` and `app0` remains at `0x10000` so Arduino/PlatformIO USB flashing keeps using the offsets it expects.
-- `/api/status` includes NVS entry usage under `hardware.nvs` for field diagnostics.
+**If you are running 0.2.x or earlier, OTA alone is not enough.** The NVS storage partition moved from `0x9000` (20 KB) to `0xa10000` (256 KB) with a new partition table. OTA updates only replace the app partition — they cannot install a new partition table. Flashing firmware over an old partition table leaves the app pointing to the wrong NVS address, which causes settings to silently revert to defaults on every boot.
 
-### Fresh Install Required for the New NVS Layout
-- Upgrading from 0.2.x to 0.3.0 requires a full USB/fresh flash so the new partition table is installed. OTA updates only replace the app partition; they cannot move or enlarge NVS.
-- Because NVS moved from the old `0x9000` area to `0xa10000`, saved settings are not automatically migrated. Record Wi-Fi, BMS, MQTT, AP, and hour-meter settings before flashing, then re-enter them after first boot.
-- Recommended recovery/fresh install flow: erase flash, then use PlatformIO USB upload or flash the merged release binary at offset `0x0`.
+**Steps required before OTA or PlatformIO upload:**
+1. Note your current Wi-Fi, BMS, MQTT, AP, and hour-meter settings — they will not survive the flash.
+2. Erase the entire chip.
+3. Flash the merged binary at offset `0x0` (includes bootloader, partition table, and firmware).
 
 ```sh
 esptool.py --chip esp32s3 --port YOUR_PORT erase_flash
-esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x0 R48Display-v0.3.0-merged.bin
+esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x0 R48Display-v0.3.1-merged.bin
 ```
 
-### Firmware Packaging Fixes
-- Local packaging and GitHub Actions now read `otadata` and `app0` offsets from `partitions.csv` when creating merged binaries.
-- App-only `firmware.bin` remains for OTA and PlatformIO app uploads after the partition table is already installed. Use the merged binary for erased boards and recovery flashes.
+After first boot, re-enter your settings via the web UI at `http://192.168.4.1` (AP mode) or your device IP.
+
+**OTA from 0.3.0 → 0.3.1 is safe** — the partition table is unchanged between these two builds.
+
+---
+
+## What's New in 0.3.1
+
+### NVS Partition Expansion
+- NVS storage grown from the ESP-IDF default 20 KB to 256 KB. This gives room for settings, hour counters, cached BMS data, degradation metrics, maintenance items, and per-item completion history without silent write failures.
+- The enlarged NVS partition lives after the two OTA app slots at `0xa10000`. `otadata` stays at `0xe000` and `app0` at `0x10000` so Arduino/PlatformIO USB flashing keeps working without offset changes.
+- `/api/status` → `hardware.nvs` reports used/free/total NVS entries and `pct_used` for field diagnostics.
+
+### Settings Persistence Fixes
+- `loadSettings()` now opens NVS in read-only mode; `saveSettings()` opens read-write — eliminates accidental writes during the load pass.
+- `saveSettings()` is called once after `loadSettings()` at startup to seed any keys added in new firmware versions, so they persist across the next reboot without a trip to the settings form.
+- `hoursBaseline` web form fix: the JS only sends the baseline field when the user actually changes the value, preventing it from silently overriding `hours_total` edits.
+- Legacy NVS keys `runtime` and `vehicle` (renamed in earlier releases) are cleaned up automatically on first boot.
+
+### LVGL Touch Navigation
+- The CST816 touch controller is now registered as a real LVGL pointer input device using screen-rotation-adjusted coordinates.
+- LCD page navigation uses horizontal swipes. Simple taps no longer flip pages accidentally.
+- Double-tap wake still works while the display is sleeping.
+- Gesture direction is remapped for 0°/90°/180°/270° rotation so left/right swipe follows the visible screen orientation regardless of mounting angle.
+
+### AP Mode Privacy
+- AP password is now editable from Settings (minimum 8 characters).
+- A new **Show AP credentials on LCD** toggle controls whether the SSID and password cycle on the status screen bottom line while in AP mode. Disable for installations in public areas.
+
+### Maintenance History and Export
+- Maintenance confirmations can include completion notes.
+- Each item keeps the 10 most recent completion records in NVS (`mh_<id>` keys).
+- The Maintenance page shows two hour-meter bars: total displayed hours (baseline + tracked), then working/active/total breakdown.
+- History drawer per item with editable completion dates and notes, CSV export, and machine/project notes.
+
+### Firmware Packaging
+- Local packaging and GitHub Actions read `otadata` and `app0` offsets from `partitions.csv` when building merged binaries.
+- App-only `firmware.bin` is still produced for OTA and PlatformIO uploads once the partition table is already installed.
 
 ### Maintenance History and Export
 - Maintenance confirmations can now include completion notes.
