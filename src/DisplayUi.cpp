@@ -1,5 +1,6 @@
 #include "DisplayUi.h"
 
+#include "AnimLayer.h"
 #include "BoardConfig.h"
 
 #include <lvgl.h>
@@ -64,6 +65,9 @@ struct UiTheme {
 };
 
 UiTheme uiTheme;
+
+static uint8_t currentAnimType = 0;
+static bool currentAnimEnabled = false;
 
 struct Widgets {
   lv_obj_t *root = nullptr;
@@ -414,6 +418,7 @@ void buildPage(uint8_t page) {
   clearHandles();
   w.root = screen;
   styleRoot(w.root);
+  AnimLayer::build(w.root, currentAnimType, currentAnimEnabled);
   switch (page % PAGE_COUNT) {
     case 0: buildDashboard(); break;
     case 1: buildPower(); break;
@@ -586,6 +591,7 @@ void tick(bool sleeping) {
   const uint32_t interval = sleeping ? 500u : LV_HANDLER_MS;
   if (now - lastHandlerMs >= interval) {
     lv_timer_handler();
+    AnimLayer::step(now);
     lastHandlerMs = now;
   }
 }
@@ -593,6 +599,9 @@ void tick(bool sleeping) {
 void draw(const Snapshot &s) {
   if (!lvReady) return;
   applyTheme(s);
+  currentAnimType = s.animType;
+  currentAnimEnabled = s.animEnabled;
+  AnimLayer::setEnabled(s.animEnabled);
   const uint8_t page = s.page % PAGE_COUNT;
   if (s.fullRedraw || activePage != page) buildPage(page);
   updateRows(s);

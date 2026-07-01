@@ -20,6 +20,7 @@
 #include <Arduino_GFX_Library.h>
 #include <NimBLEDevice.h>
 
+#include "AnimLayer.h"
 #include "BoardConfig.h"
 #include "DisplayUi.h"
 #include "MicDetector.h"
@@ -86,6 +87,7 @@ struct ThemeProfile {
   const char *label;
   const char *family;
   const char *description;
+  uint8_t animType;
   uint32_t bg;
   uint32_t panel;
   uint32_t panel2;
@@ -151,36 +153,79 @@ constexpr BmsProfile BMS_PROFILES[] = {
 constexpr ThemeProfile THEME_PROFILES[] = {
     {"chlorophyll_shift", "Chlorophyll Shift", "green",
      "Vibrant Ryobi-style lime green with high contrast battery telemetry.",
+     Anim::Grass,
      0x020700, 0x071306, 0x10220A, 0x4F7F19,
      0xFAFFF2, 0xC4ECA7, 0xCCFF00, 0x6FDB00, 0x00F060, 0xFFE500, 0xFF3355, 0x081000},
     {"redline_charge", "Redline Charge", "red",
      "Bright red scheme for carts, utility haulers, and performance builds.",
+     Anim::SpeedLines,
      0x090103, 0x1C0509, 0x330912, 0x7A1B25,
      0xFFF4F4, 0xFFC0C7, 0xFF1744, 0xFF5A00, 0xFFE600, 0x00F5D4, 0xFF00A8, 0x180004},
     {"violet_voltage", "Violet Voltage", "purple",
      "Purple and cyan palette for custom packs and show builds.",
+     Anim::Lightning,
      0x07060B, 0x12101B, 0x1F1730, 0x352B4B,
      0xFCF7FF, 0xB9A7CF, 0xC77DFF, 0x6D37A8, 0x64D2FF, 0xFFE066, 0xFF5C8A, 0x12051D},
     {"blue_fairway", "Blue Fairway", "blue",
      "Clean blue interface for golf carts, marine packs, and fleet equipment.",
+     Anim::Ripple,
      0x05080D, 0x0E1622, 0x13243A, 0x263A52,
      0xF2F8FF, 0x9EB2C7, 0x49B6FF, 0x1768AC, 0x7CFFCB, 0xF9C74F, 0xFF5A5F, 0x03111D},
     {"orange_ignition", "Orange Ignition", "orange",
      "Warm orange scheme for trailers, RVs, and shop power systems.",
+     Anim::Embers,
      0x0A0704, 0x181109, 0x26180A, 0x3E2B17,
      0xFFF9F0, 0xC8AA84, 0xFF9F1C, 0xB85C00, 0x2EC4B6, 0xFFE066, 0xE71D36, 0x1B0900},
     {"fabulous", "Fabulous!", "neon",
      "Vegas strip neon palette — hot pink, electric cyan, neon yellow on deep purple-black.",
+     Anim::Rave,
      0x0A0012, 0x14001E, 0x1E0030, 0x5C0070,
      0xFFFFFF, 0xFFB8FF, 0xFF0090, 0xCC006C, 0x00F0FF, 0xFFEE00, 0xFF3300, 0x0A0012},
     {"pixel_fairway", "Pixel Fairway", "retro",
      "Retro display style for older carts, restored equipment, and DIY cabinets.",
+     Anim::PixelRain,
      0x080A06, 0x15180D, 0x222510, 0x4D5830,
      0xF3F0C2, 0xB9B47B, 0xD6D93B, 0x6B7F1A, 0xF28C28, 0xF2D16B, 0xD1495B, 0x101204},
     {"modern_graphite", "Modern Graphite", "modern",
      "Quiet modern palette for power stations, RV panels, and clean dash installs.",
+     Anim::Geometry,
      0x07090B, 0x11151A, 0x1A2028, 0x303946,
      0xF4F7FA, 0xAAB3BE, 0xE5F0FF, 0x7D8EA3, 0x79FFE1, 0xFFD166, 0xFF5C7A, 0x05090D},
+    {"murica", "'Murica", "patriotic",
+     "Red, white, and blue for the land of the free. Maximum patriotism.",
+     Anim::FireworksFlag,
+     0x01030F, 0x05102A, 0x0A1A40, 0x1B3872,
+     0xFFFFFF, 0xA8BFDF, 0xFF1818, 0xBD0000, 0x4499FF, 0xFFCC00, 0xFF4444, 0x020810},
+    {"halloween", "Halloween", "spooky",
+     "Pumpkin orange and eerie purple for the haunted season.",
+     Anim::Bats,
+     0x080010, 0x120520, 0x1C0A30, 0x3D1060,
+     0xFFEE88, 0xCC8844, 0xFF6600, 0xCC4400, 0x33FF77, 0xBB44FF, 0xFF0022, 0x060010},
+    {"thanksgiving", "Thanksgiving", "harvest",
+     "Warm harvest palette of amber, rust, and sage.",
+     Anim::Leaves,
+     0x100800, 0x1E1004, 0x2E1A06, 0x6B3D10,
+     0xFFF5DC, 0xC8A06A, 0xFF8C00, 0xC05C00, 0x8FB870, 0xFFD700, 0xFF4444, 0x100800},
+    {"christmas", "Christmas", "holiday",
+     "Classic Christmas red and green with gold ornament accents.",
+     Anim::Snow,
+     0x010A04, 0x05180A, 0x082B10, 0x144D22,
+     0xFFFAF0, 0xB8C8B8, 0xEE1111, 0xAA0000, 0xFFD700, 0xCCDDFF, 0xFF4444, 0x010604},
+    {"valentine", "Valentine's Day", "romantic",
+     "Deep rose and hot pink with golden hearts.",
+     Anim::Hearts,
+     0x0F0208, 0x1F0514, 0x2E0820, 0x6B1040,
+     0xFFF0F5, 0xDDA0BB, 0xFF1493, 0xCC0066, 0xFF6699, 0xFFD700, 0xFF5555, 0x0F0208},
+    {"space", "Deep Space", "cosmic",
+     "Infinite black with distant stars and nebula tones.",
+     Anim::Stars,
+     0x010108, 0x05050F, 0x0A0A18, 0x1A1A30,
+     0xF0F0FF, 0x8888AA, 0x8866FF, 0x442288, 0x44BBFF, 0xFFAA44, 0xFF4466, 0x010108},
+    {"new_years", "New Year's Eve", "celebration",
+     "Midnight black with gold, silver, and fireworks.",
+     Anim::Fireworks,
+     0x020202, 0x0A0A0A, 0x121212, 0x303030,
+     0xFFFFFF, 0xCCCCCC, 0xFFD700, 0xB8860B, 0xC0C0C0, 0xFF6633, 0xFF4444, 0x020202},
 };
 
 constexpr UsageCategory USAGE_CATEGORIES[] = {
@@ -245,6 +290,7 @@ struct AppSettings {
   bool ntpEnabled = true;
   String ntpServer = DEFAULT_NTP_SERVER;
   bool advertiseApCredentials = true;  // cycle AP SSID/pass on LCD status line in AP mode
+  bool animEnabled = true;
 };
 
 struct BatterySample {
@@ -2522,6 +2568,7 @@ void loadSettings() {
   settings.ntpEnabled = prefs.getBool("ntpOn", true);
   settings.ntpServer = prefs.getString("ntpHost", DEFAULT_NTP_SERVER);
   settings.advertiseApCredentials = prefs.getBool("apCredsAdv", true);
+  settings.animEnabled = prefs.getBool("animOn", true);
   settings.labelCharging = prefs.getString("lblChg", "");
   settings.labelStandby = prefs.getString("lblStby", "");
   settings.labelActive = prefs.getString("lblAct", "");
@@ -2617,6 +2664,7 @@ void saveSettings() {
   prefs.putString("lblWork", settings.labelWorking);
   prefs.putFloat("hrsBase", settings.hoursBaseline);
   prefs.putBool("apCredsAdv", settings.advertiseApCredentials);
+  prefs.putBool("animOn", settings.animEnabled);
   prefs.end();
 }
 
@@ -3360,6 +3408,8 @@ void drawDisplay(bool fullRedraw) {
   s.powerSaveEnabled = settings.powerSaveEnabled;
   s.apPassword = settings.apPassword;
   s.advertiseApCreds = settings.advertiseApCredentials;
+  s.animType = activeTheme().animType;
+  s.animEnabled = settings.animEnabled;
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;
@@ -3741,6 +3791,7 @@ void apiSettingsGet() {
   doc["ap_ssid"] = apSsid;
   doc["ap_password_set"] = settings.apPassword.length() >= 8;
   doc["advertise_ap_credentials"] = settings.advertiseApCredentials;
+  doc["anim_enabled"] = settings.animEnabled;
   doc["ota_password_set"] = settings.otaPassword.length() >= 8;
   doc["wifi_ssid"] = settings.wifiSsid;
   doc["wifi_password_set"] = !settings.wifiPassword.isEmpty();
@@ -3807,6 +3858,7 @@ void apiSettingsPost() {
   if (server.hasArg("ota_password") && server.arg("ota_password").length() >= 8) settings.otaPassword = server.arg("ota_password");
   if (server.hasArg("ap_password") && server.arg("ap_password").length() >= 8) settings.apPassword = server.arg("ap_password");
   if (server.hasArg("advertise_ap_credentials")) settings.advertiseApCredentials = server.arg("advertise_ap_credentials") == "1";
+  if (server.hasArg("anim_enabled")) settings.animEnabled = server.arg("anim_enabled") == "1";
   if (server.hasArg("wifi_ssid")) settings.wifiSsid = server.arg("wifi_ssid");
   if (server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0) settings.wifiPassword = server.arg("wifi_password");
   if (server.hasArg("bms_name")) settings.bmsName = server.arg("bms_name");

@@ -232,6 +232,7 @@ String settingsBody() {
       "<option value='270'>270&deg;</option>"
       "</select></label>"
       "<label class='check'><input name='display_enabled' type='checkbox'> Display enabled</label>"
+      "<label class='check'><input name='anim_enabled' type='checkbox'> Background animations enabled</label>"
       "</div>"
       "</div>"
 
@@ -882,6 +883,7 @@ function wireActions() {
     data.power_save_enabled = form.elements.power_save_enabled.checked ? '1' : '0';
     data.mqtt_enabled = form.elements.mqtt_enabled.checked ? '1' : '0';
     data.advertise_ap_credentials = form.elements.advertise_ap_credentials.checked ? '1' : '0';
+    data.anim_enabled = form.elements.anim_enabled.checked ? '1' : '0';
     delete data.standby_hint;
     delete data.hours_counted;
     // Only send hours_baseline if the user actually changed it; otherwise let

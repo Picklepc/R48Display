@@ -59,6 +59,8 @@ struct Snapshot {
   bool powerSaveEnabled = false;
   String apPassword;
   bool advertiseApCreds = true;
+  uint8_t animType = 0;
+  bool animEnabled = true;
 
   uint32_t themeBg = 0x050605;
   uint32_t themePanel = 0x10170D;
