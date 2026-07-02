@@ -66,6 +66,16 @@ String dashboardBody() {
       "<div class='metric'><div class='label'>MQTT</div><div class='value sm' id='sys-mqtt'>--</div></div>"
       "<div class='metric'><div class='label'>BLE Policy</div><div class='value sm' id='sys-ble-pol'>--</div></div>"
       "</div>"
+      "</section>"
+      // Weather card
+      "<section class='card'>"
+      "<h2>Weather</h2>"
+      "<div id='wx-current' style='display:flex;align-items:baseline;gap:14px;margin-bottom:14px'>"
+      "<span id='wx-temp' style='font-size:36px;font-weight:700;color:var(--primary)'>--</span>"
+      "<span id='wx-cond' style='font-size:20px;color:var(--text)'>--</span>"
+      "<span id='wx-loc' style='font-size:12px;color:var(--muted);margin-left:auto;align-self:flex-end'>--</span>"
+      "</div>"
+      "<div id='wx-forecast' style='display:flex;gap:6px;flex-wrap:wrap'></div>"
       "</section>");
 }
 
@@ -224,6 +234,7 @@ String settingsBody() {
       "<option value='F'>Fahrenheit (&deg;F)</option>"
       "<option value='C'>Celsius (&deg;C)</option>"
       "</select></label>"
+      "<label>Weather Zip Code<input name='zip_code' maxlength='5' pattern='[0-9]{5}' inputmode='numeric' autocomplete='off' placeholder='e.g. 90210'><span class='hint'>US zip code — fetches current weather and 7-day forecast</span></label>"
       "<label>Brightness<input name='brightness' type='range' min='20' max='255'></label>"
       "<label>Display Rotation<select name='display_rotation'>"
       "<option value='0'>0&deg; (default)</option>"
@@ -755,6 +766,35 @@ async function refresh() {
   }
 }
 
+async function refreshWeather() {
+  if (!$('wx-forecast')) return;
+  try {
+    const data = await (await fetch('/api/weather', {cache:'no-store'})).json();
+    if (data.valid) {
+      text('wx-temp', data.temp || '--');
+      text('wx-cond', data.condition || '--');
+      text('wx-loc', data.zip ? 'ZIP ' + data.zip : '');
+      const fc = $('wx-forecast');
+      if (fc && data.forecast) {
+        fc.innerHTML = data.forecast.map(d =>
+          `<div style='background:var(--panel2);border-radius:7px;padding:10px 12px;min-width:62px;text-align:center;flex:1'>`+
+          `<div style='font-size:11px;color:var(--muted);margin-bottom:4px'>${d.day}</div>`+
+          `<div style='font-size:11px;color:var(--text);margin-bottom:6px;line-height:1.2'>${d.cond}</div>`+
+          `<div style='font-size:15px;font-weight:600;color:var(--primary)'>${d.hi}</div>`+
+          `<div style='font-size:12px;color:var(--muted)'>${d.lo}</div>`+
+          `</div>`
+        ).join('');
+      }
+    } else {
+      text('wx-temp', '--');
+      text('wx-cond', data.zip ? 'Waiting…' : 'Set zip in Settings');
+      text('wx-loc', data.zip ? 'ZIP ' + data.zip : '');
+      const fc = $('wx-forecast');
+      if (fc) fc.innerHTML = '';
+    }
+  } catch(e) {}
+}
+
 async function loadProfiles() {
   const select = $('bms-protocol');
   if (!select) return;
@@ -958,6 +998,8 @@ loadSettings().then(() => {
 });
 refresh();
 setInterval(refresh, 2500);
+refreshWeather();
+setInterval(refreshWeather, 5 * 60 * 1000);
 
 // ── Maintenance tracker ───────────────────────────────────────────────────
 const MAINT_TYPE_LABELS = {HOURS_ACTIVE:'Active Hours',HOURS_WORKING:'Working Hours',HOURS_TOTAL:'Total Hours',DAYS:'Days'};

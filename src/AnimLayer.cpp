@@ -87,9 +87,20 @@ static void buildFlag(lv_obj_t *root) {
   // Canton — upper-left, 2/5 wide × 7 stripes tall (144×189)
   constexpr int16_t CW = FW * 2 / 5, CH = SH * 7;
   mkobj(FX, FY, CW, CH, 0x0A3161, 255, 0);
-  // Stars — 5×4 grid = 20 stars
-  for (uint8_t i = 0; i < 20; ++i)
-    mkobj(FX + 8 + (i % 5) * 26, FY + 12 + (i / 5) * 54, 6, 6, 0xFFFFFF, 220, LV_RADIUS_CIRCLE);
+  // Stars — 4×4 grid = 16 asterisk labels (Montserrat-48 "*" renders as a large 6-arm star)
+  auto mkstar = [&](int16_t x, int16_t y) {
+    lv_obj_t *s = lv_label_create(root);
+    lv_label_set_text(s, "*");
+    lv_obj_set_style_text_font(s, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(s, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_opa(s, 230, 0);
+    lv_obj_set_style_bg_opa(s, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s, 0, 0);
+    lv_obj_set_style_pad_all(s, 0, 0);
+    lv_obj_set_pos(s, x, y);
+  };
+  for (uint8_t i = 0; i < 16; ++i)
+    mkstar(FX + 4 + (i % 4) * 33, FY + 8 + (i / 4) * 43);
 }
 
 // ─── Spawners — each returns ms until next event ─────────────────────────────
@@ -243,20 +254,10 @@ static uint32_t evtLeaves() {
 }
 
 static uint32_t evtHearts() {
-  // 3-circle heart: two bumps at top + wider body below; same velocity holds shape
   constexpr uint32_t p[] = {0xFF1493,0xFF69B4,0xFF0055,0xFF88CC,0xFF3366};
-  uint8_t n = 1 + r32() % 2;
-  for (uint8_t i = 0; i < n; ++i) {
-    float cx  = rf(35, W-35);
-    float cy  = (float)H + 14;
-    float vx  = rc(0, 12);
-    float vy  = rf(-70, -30);
-    float lf  = rf(5.0f, 8.0f);
-    uint32_t col = p[r32() % 5];
-    spawn(cx - 6, cy - 5, vx, vy, lf, col, 13);  // left bump
-    spawn(cx + 6, cy - 5, vx, vy, lf, col, 13);  // right bump
-    spawn(cx,     cy + 3, vx, vy, lf, col, 15);  // lower body
-  }
+  uint8_t n = 1 + r32() % 3;
+  for (uint8_t i = 0; i < n; ++i)
+    spawn(rf(30,W-30), H+10, rc(0,22), rf(-75,-30), rf(4.5f,8.5f), p[r32()%5], 14+r32()%8);
   return 900 + r32() % 1800;
 }
 
@@ -292,7 +293,7 @@ static void stepDots(float dt) {
         d.vy  = clamp(d.vy + 6.0f * dt, 14.0f, 115.0f);
         d.vx += rc(0, 12.0f) * dt; break;
       case Anim::Hearts:
-        d.vx += rc(0, 1.0f) * dt; break;
+        d.vx += rc(0, 5.0f) * dt; break;
       case Anim::Embers:
       case Anim::Grass:
         d.vy -= 10.0f * dt; d.vx *= 0.994f; break;

@@ -7,6 +7,7 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <math.h>
@@ -292,6 +293,9 @@ struct AppSettings {
   bool advertiseApCredentials = true;  // cycle AP SSID/pass on LCD status line in AP mode
   bool animEnabled = false;
   uint8_t animType = 255;  // 255 = use theme default
+  String zipCode;
+  float weatherLat = 0.0f;
+  float weatherLon = 0.0f;
 };
 
 struct BatterySample {
@@ -416,6 +420,19 @@ struct DegradationData {
 } degradation;
 
 AppSettings settings;
+
+struct WeatherDay { String cond; float hi = 0.0f; float lo = 0.0f; };
+struct WeatherData {
+  bool valid = false;
+  float tempC = 0.0f;
+  uint8_t wmo = 0;
+  String cond;
+  WeatherDay forecast[7];
+};
+static WeatherData gWeather;
+static SemaphoreHandle_t weatherMux = nullptr;
+static TaskHandle_t weatherTaskHandle = nullptr;
+
 MqttClient mqttClient;
 BatterySample screenBattery;
 float screenBatteryBootVolts = 0.0f;
@@ -2525,6 +2542,121 @@ void normalizeHourCounters() {
   hoursWorking = min(max(0.0f, hoursWorking), hoursActive);
 }
 
+// ── Weather helpers ───────────────────────────────────────────────────────────
+
+static const char* wmoCondition(int code) {
+  if (code == 0)       return "Clear";
+  if (code <= 3)       return "Cloudy";
+  if (code <= 48)      return "Fog";
+  if (code <= 55)      return "Drizzle";
+  if (code <= 65)      return "Rain";
+  if (code <= 77)      return "Snow";
+  if (code <= 82)      return "Showers";
+  if (code <= 86)      return "Sleet";
+  return "Storm";
+}
+
+bool geocodeZip(const String &zip, float &lat, float &lon) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  HTTPClient http;
+  http.setTimeout(6000);
+  http.begin("http://api.zippopotam.us/us/" + zip);
+  const int code = http.GET();
+  if (code != 200) { http.end(); return false; }
+  const String body = http.getString();
+  http.end();
+  JsonDocument doc;
+  if (deserializeJson(doc, body) != DeserializationError::Ok) return false;
+  const char *latStr = doc["places"][0]["latitude"];
+  const char *lonStr = doc["places"][0]["longitude"];
+  if (!latStr || !lonStr) return false;
+  lat = String(latStr).toFloat();
+  lon = String(lonStr).toFloat();
+  return true;
+}
+
+bool fetchWeatherData() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (settings.weatherLat == 0.0f && settings.weatherLon == 0.0f) return false;
+  char url[300];
+  snprintf(url, sizeof(url),
+    "http://api.open-meteo.com/v1/forecast"
+    "?latitude=%.4f&longitude=%.4f"
+    "&current=temperature_2m,weather_code"
+    "&daily=weather_code,temperature_2m_max,temperature_2m_min"
+    "&timezone=auto&forecast_days=7",
+    settings.weatherLat, settings.weatherLon);
+  HTTPClient http;
+  http.setTimeout(10000);
+  http.begin(url);
+  const int code = http.GET();
+  if (code != 200) { http.end(); return false; }
+  const String body = http.getString();
+  http.end();
+  JsonDocument doc;
+  if (deserializeJson(doc, body) != DeserializationError::Ok) return false;
+  if (!weatherMux || xSemaphoreTake(weatherMux, pdMS_TO_TICKS(500)) != pdTRUE) return false;
+  gWeather.tempC = doc["current"]["temperature_2m"] | 0.0f;
+  gWeather.wmo   = doc["current"]["weather_code"] | 0;
+  gWeather.cond  = wmoCondition(gWeather.wmo);
+  for (int i = 0; i < 7; ++i) {
+    gWeather.forecast[i].hi   = doc["daily"]["temperature_2m_max"][i] | 0.0f;
+    gWeather.forecast[i].lo   = doc["daily"]["temperature_2m_min"][i] | 0.0f;
+    gWeather.forecast[i].cond = wmoCondition(doc["daily"]["weather_code"][i] | 0);
+  }
+  gWeather.valid = true;
+  xSemaphoreGive(weatherMux);
+  return true;
+}
+
+void weatherTask(void *) {
+  vTaskDelay(pdMS_TO_TICKS(15000));
+  while (true) {
+    fetchWeatherData();
+    xTaskNotifyWait(0, ULONG_MAX, nullptr, pdMS_TO_TICKS(30UL * 60UL * 1000UL));
+  }
+}
+
+void apiWeatherGet() {
+  JsonDocument doc;
+  doc["zip"] = settings.zipCode;
+  if (weatherMux && xSemaphoreTake(weatherMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+    doc["valid"] = gWeather.valid;
+    if (gWeather.valid) {
+      const bool useCelsius = settings.tempUnit == "C";
+      const String unit = useCelsius ? "C" : "F";
+      auto toDisp = [&](float c) -> int {
+        return (int)roundf(useCelsius ? c : c * 9.0f / 5.0f + 32.0f);
+      };
+      char tbuf[14];
+      snprintf(tbuf, sizeof(tbuf), "%d\xC2\xB0%s", toDisp(gWeather.tempC), unit.c_str());
+      doc["temp"] = tbuf;
+      doc["condition"] = gWeather.cond;
+      doc["wmo"] = gWeather.wmo;
+      const char *dayNames[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+      time_t now = time(nullptr);
+      struct tm *ti = localtime(&now);
+      JsonArray fc = doc["forecast"].to<JsonArray>();
+      for (int i = 0; i < 7; ++i) {
+        JsonObject d = fc.add<JsonObject>();
+        d["day"] = dayNames[(ti->tm_wday + i) % 7];
+        char hibuf[14], lobuf[14];
+        snprintf(hibuf, sizeof(hibuf), "%d\xC2\xB0%s", toDisp(gWeather.forecast[i].hi), unit.c_str());
+        snprintf(lobuf, sizeof(lobuf), "%d\xC2\xB0%s", toDisp(gWeather.forecast[i].lo), unit.c_str());
+        d["hi"] = hibuf;
+        d["lo"] = lobuf;
+        d["cond"] = gWeather.forecast[i].cond;
+      }
+    }
+    xSemaphoreGive(weatherMux);
+  } else {
+    doc["valid"] = false;
+  }
+  sendJson(doc);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 void loadSettings() {
   prefs.begin("r48disp", true);
   settings.hostname = prefs.getString("host", defaultHostname());
@@ -2571,6 +2703,9 @@ void loadSettings() {
   settings.advertiseApCredentials = prefs.getBool("apCredsAdv", true);
   settings.animEnabled = prefs.getBool("animOn", false);
   settings.animType    = prefs.getUChar("animTyp", 255);
+  settings.zipCode     = prefs.getString("wxZip", "");
+  settings.weatherLat  = prefs.getFloat("wxLat", 0.0f);
+  settings.weatherLon  = prefs.getFloat("wxLon", 0.0f);
   settings.labelCharging = prefs.getString("lblChg", "");
   settings.labelStandby = prefs.getString("lblStby", "");
   settings.labelActive = prefs.getString("lblAct", "");
@@ -2668,6 +2803,9 @@ void saveSettings() {
   prefs.putBool("apCredsAdv", settings.advertiseApCredentials);
   prefs.putBool("animOn", settings.animEnabled);
   prefs.putUChar("animTyp", settings.animType);
+  prefs.putString("wxZip", settings.zipCode);
+  prefs.putFloat("wxLat", settings.weatherLat);
+  prefs.putFloat("wxLon", settings.weatherLon);
   prefs.end();
 }
 
@@ -3413,6 +3551,18 @@ void drawDisplay(bool fullRedraw) {
   s.advertiseApCreds = settings.advertiseApCredentials;
   s.animType = settings.animType <= 15 ? settings.animType : activeTheme().animType;
   s.animEnabled = settings.animEnabled;
+  if (weatherMux && xSemaphoreTake(weatherMux, 0) == pdTRUE) {
+    s.weatherValid = gWeather.valid;
+    if (gWeather.valid) {
+      const float t = (settings.tempUnit == "C") ? gWeather.tempC
+                      : gWeather.tempC * 9.0f / 5.0f + 32.0f;
+      char tbuf[12];
+      snprintf(tbuf, sizeof(tbuf), "%.0f\xC2\xB0%s", t, settings.tempUnit.c_str());
+      s.weatherTemp = tbuf;
+      s.weatherCond = gWeather.cond;
+    }
+    xSemaphoreGive(weatherMux);
+  }
   static uint8_t lastAnimType = 255;
   static bool lastAnimEnabled = false;
   if (s.animType != lastAnimType || s.animEnabled != lastAnimEnabled) {
@@ -3803,6 +3953,7 @@ void apiSettingsGet() {
   doc["advertise_ap_credentials"] = settings.advertiseApCredentials;
   doc["anim_enabled"] = settings.animEnabled;
   doc["anim_type"]    = settings.animType <= 15 ? (int)settings.animType : (int)activeTheme().animType;
+  doc["zip_code"]     = settings.zipCode;
   doc["ota_password_set"] = settings.otaPassword.length() >= 8;
   doc["wifi_ssid"] = settings.wifiSsid;
   doc["wifi_password_set"] = !settings.wifiPassword.isEmpty();
@@ -3871,6 +4022,21 @@ void apiSettingsPost() {
   if (server.hasArg("advertise_ap_credentials")) settings.advertiseApCredentials = server.arg("advertise_ap_credentials") == "1";
   if (server.hasArg("anim_enabled")) settings.animEnabled = server.arg("anim_enabled") == "1";
   if (server.hasArg("anim_type")) { int t = server.arg("anim_type").toInt(); settings.animType = (t >= 0 && t <= 15) ? (uint8_t)t : 255; }
+  if (server.hasArg("zip_code")) {
+    String z = server.arg("zip_code"); z.trim();
+    if (z.length() == 5) {
+      const bool changed = (z != settings.zipCode);
+      settings.zipCode = z;
+      if (changed) {
+        float lat = 0.0f, lon = 0.0f;
+        if (geocodeZip(z, lat, lon)) {
+          settings.weatherLat = lat;
+          settings.weatherLon = lon;
+          if (weatherTaskHandle) xTaskNotify(weatherTaskHandle, 1, eSetBits);
+        }
+      }
+    }
+  }
   if (server.hasArg("wifi_ssid")) settings.wifiSsid = server.arg("wifi_ssid");
   if (server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0) settings.wifiPassword = server.arg("wifi_password");
   if (server.hasArg("bms_name")) settings.bmsName = server.arg("bms_name");
@@ -4200,6 +4366,7 @@ void setupRoutes() {
   server.on("/api/mqtt/publish-now", HTTP_POST, apiMqttPublishNow);
   server.on("/api/mqtt/rediscover", HTTP_POST, apiMqttRediscover);
   server.on("/api/mqtt/test", HTTP_GET, apiMqttTest);
+  server.on("/api/weather", HTTP_GET, apiWeatherGet);
   server.onNotFound([]() {
     server.sendHeader("Location", "/", true);
     server.send(302, "text/plain", "");
@@ -4275,6 +4442,8 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) configureClock();
   setupOta();
   setupRoutes();
+  weatherMux = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(weatherTask, "weather", 12288, nullptr, 1, &weatherTaskHandle, 0);
   drawDisplay(true);
   Serial.printf("WiFi mode: %s\n", provisioningActive ? "setup AP" : "STA");
   Serial.printf("Touch %s\n", touchReady ? "ready" : "missing");

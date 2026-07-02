@@ -62,6 +62,10 @@ struct Snapshot {
   uint8_t animType = 0;
   bool animEnabled = true;
 
+  bool weatherValid = false;
+  String weatherTemp;
+  String weatherCond;
+
   uint32_t themeBg = 0x050605;
   uint32_t themePanel = 0x10170D;
   uint32_t themePanel2 = 0x17220F;

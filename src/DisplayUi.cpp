@@ -397,6 +397,9 @@ void buildClock() {
   w.metric[0] = label(w.root, "--", 83, 96, 194, &lv_font_montserrat_20, COL_PRIMARY, LV_TEXT_ALIGN_CENTER);
   w.metric[1] = label(w.root, "--", 86, 244, 188, &lv_font_montserrat_16, COL_MUTED, LV_TEXT_ALIGN_CENTER);
   w.metric[2] = label(w.root, "--", 60, 286, 240, &lv_font_montserrat_14, COL_ACCENT, LV_TEXT_ALIGN_CENTER);
+  // Weather: temp left of center, condition right of center
+  w.metric[3] = label(w.root, "", 18, 210, 148, &lv_font_montserrat_14, COL_PRIMARY, LV_TEXT_ALIGN_RIGHT);
+  w.metric[4] = label(w.root, "", 174, 210, 148, &lv_font_montserrat_12, COL_MUTED, LV_TEXT_ALIGN_LEFT);
 }
 
 void buildStatus() {
@@ -472,6 +475,8 @@ void updateClock(const Snapshot &s) {
   setText(w.metric[0], clockTimeText(s));
   setText(w.metric[1], clockDateText(localTime));
   setText(w.metric[2], upper(s.mode.length() ? s.mode : "standby"));
+  setText(w.metric[3], s.weatherValid ? s.weatherTemp : "");
+  setText(w.metric[4], s.weatherValid ? s.weatherCond : "");
 }
 
 void updateDashboard(const Snapshot &s) {
