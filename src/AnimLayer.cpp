@@ -86,19 +86,19 @@ static void buildFlag(lv_obj_t *root) {
     mkobj(FX, FY + i * SH, FW, i == 12 ? FH - 12 * SH : SH, sc[i], i % 2 == 0 ? 110 : 60, 0);
   // Canton — upper-left, 2/5 wide × 7 stripes tall (144×189)
   constexpr int16_t CW = FW * 2 / 5, CH = SH * 7;
-  mkobj(FX, FY, CW, CH, 0x0A3161, 130, 0);
+  mkobj(FX, FY, CW, CH, 0x0A3161, 255, 0);
   // Stars — 5×4 grid = 20 stars
   for (uint8_t i = 0; i < 20; ++i)
-    mkobj(FX + 8 + (i % 5) * 26, FY + 12 + (i / 5) * 54, 5, 5, 0xFFFFFF, 190, LV_RADIUS_CIRCLE);
+    mkobj(FX + 8 + (i % 5) * 26, FY + 12 + (i / 5) * 54, 6, 6, 0xFFFFFF, 220, LV_RADIUS_CIRCLE);
 }
 
 // ─── Spawners — each returns ms until next event ─────────────────────────────
 static uint32_t evtStars() {
-  uint8_t n = 1 + r32() % 3;
+  uint8_t n = 3 + r32() % 4;
   for (uint8_t i = 0; i < n; ++i)
-    spawn(rf(10, W-10), rf(10, H-10), 0, 0,
-          rf(1.2f, 3.2f), r32() % 4 == 0 ? 0xAADDFF : 0xFFFFFF, 1 + r32() % 2);
-  return 2500 + r32() % 5000;
+    spawn(rf(8, W-8), rf(8, H-8), 0, 0,
+          rf(1.5f, 3.5f), r32() % 3 == 0 ? 0xAADDFF : 0xFFFFFF, 3 + r32() % 2);
+  return 600 + r32() % 1400;
 }
 
 static uint32_t evtEmbers() {
@@ -208,15 +208,22 @@ static uint32_t evtFireworks(bool hasFlag) {
 }
 
 static uint32_t evtBats() {
-  constexpr uint32_t p[] = {0x330055,0x220033,0x440066,0x1A0033};
-  uint8_t n = 1 + r32() % 2;
-  for (uint8_t i = 0; i < n; ++i) {
-    bool left = r32() % 2;
-    float x = left ? -6.0f : (float)(W+6);
-    float vx = left ? rf(55,115) : rf(-115,-55);
-    spawn(x, rf(40,260), vx, rc(0,14), rf(3.5f,5.5f), p[r32()%4], 5+r32()%3);
-  }
-  return 3500 + r32() % 7000;
+  // 5-circle bat silhouette: body + inner wings + outer tips, all same velocity
+  // so the formation holds shape as it crosses the screen
+  constexpr uint32_t p[] = {0xFF7700, 0xFF5500, 0xFF9900, 0xDD5500};
+  bool left = r32() % 2;
+  float cx  = left ? -22.0f : (float)(W+22);
+  float vx  = left ? rf(50,95) : rf(-95,-50);
+  float cy  = rf(40, 270);
+  float vy  = rc(0, 8);
+  float lf  = rf(3.5f, 6.0f);
+  uint32_t col = p[r32() % 4];
+  spawn(cx,      cy,     vx, vy, lf, col, 12);  // body
+  spawn(cx -  8, cy - 3, vx, vy, lf, col, 12);  // inner wing L
+  spawn(cx +  8, cy - 3, vx, vy, lf, col, 12);  // inner wing R
+  spawn(cx - 16, cy - 7, vx, vy, lf, col, 10);  // tip L
+  spawn(cx + 16, cy - 7, vx, vy, lf, col, 10);  // tip R
+  return 4000 + r32() % 8000;
 }
 
 static uint32_t evtSnow() {
@@ -236,10 +243,20 @@ static uint32_t evtLeaves() {
 }
 
 static uint32_t evtHearts() {
+  // 3-circle heart: two bumps at top + wider body below; same velocity holds shape
   constexpr uint32_t p[] = {0xFF1493,0xFF69B4,0xFF0055,0xFF88CC,0xFF3366};
-  uint8_t n = 1 + r32() % 3;
-  for (uint8_t i = 0; i < n; ++i)
-    spawn(rf(30,W-30), H+10, rc(0,22), rf(-75,-30), rf(4.5f,8.5f), p[r32()%5], 14+r32()%8);
+  uint8_t n = 1 + r32() % 2;
+  for (uint8_t i = 0; i < n; ++i) {
+    float cx  = rf(35, W-35);
+    float cy  = (float)H + 14;
+    float vx  = rc(0, 12);
+    float vy  = rf(-70, -30);
+    float lf  = rf(5.0f, 8.0f);
+    uint32_t col = p[r32() % 5];
+    spawn(cx - 6, cy - 5, vx, vy, lf, col, 13);  // left bump
+    spawn(cx + 6, cy - 5, vx, vy, lf, col, 13);  // right bump
+    spawn(cx,     cy + 3, vx, vy, lf, col, 15);  // lower body
+  }
   return 900 + r32() % 1800;
 }
 
@@ -275,7 +292,7 @@ static void stepDots(float dt) {
         d.vy  = clamp(d.vy + 6.0f * dt, 14.0f, 115.0f);
         d.vx += rc(0, 12.0f) * dt; break;
       case Anim::Hearts:
-        d.vx += rc(0, 5.0f) * dt; break;
+        d.vx += rc(0, 1.0f) * dt; break;
       case Anim::Embers:
       case Anim::Grass:
         d.vy -= 10.0f * dt; d.vx *= 0.994f; break;
@@ -358,7 +375,7 @@ void build(lv_obj_t *root, uint8_t animType, bool enabled) {
 
   for (auto &d : pool) { d.o = nullptr; d.on = false; d.life = 0; }
 
-  if (animType == Anim::None || !root) return;
+  if (animType == Anim::None || !root || !enabled) return;
 
   if (animType == Anim::FireworksFlag) buildFlag(root);  // behind pool dots
 

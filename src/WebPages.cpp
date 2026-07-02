@@ -894,10 +894,16 @@ function wireActions() {
   $('theme-select')?.addEventListener('change', e => {
     updateThemeDescription();
     updateAnimForTheme(e.target.value);
-    postForm('/api/settings', {theme_id: e.target.value}).then(() => refreshThemeCss());
+    const animSel = document.getElementById('anim-type-select');
+    const payload = {theme_id: e.target.value};
+    if (animSel) payload.anim_type = animSel.value;
+    postForm('/api/settings', payload).then(() => refreshThemeCss());
+  });
+  document.getElementById('animEnabledCb')?.addEventListener('change', e => {
+    postForm('/api/settings', {anim_enabled: e.target.checked ? '1' : '0'});
   });
   document.getElementById('anim-type-select')?.addEventListener('change', e => {
-    postForm('/api/settings', {anim_type: e.target.value, anim_enabled: '1'});
+    postForm('/api/settings', {anim_type: e.target.value});
   });
   let brightnessTimer = null;
   document.querySelector('[name=brightness]')?.addEventListener('input', e => {

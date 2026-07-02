@@ -3414,7 +3414,12 @@ void drawDisplay(bool fullRedraw) {
   s.animType = settings.animType <= 15 ? settings.animType : activeTheme().animType;
   s.animEnabled = settings.animEnabled;
   static uint8_t lastAnimType = 255;
-  if (s.animType != lastAnimType) { s.fullRedraw = true; lastAnimType = s.animType; }
+  static bool lastAnimEnabled = false;
+  if (s.animType != lastAnimType || s.animEnabled != lastAnimEnabled) {
+    s.fullRedraw = true;
+    lastAnimType = s.animType;
+    lastAnimEnabled = s.animEnabled;
+  }
   s.localTime = currentTimeText("%Y-%m-%d %H:%M:%S");
   s.uptime = formatDuration(millis() / 1000ULL);
   s.firmware = FIRMWARE_VERSION;
