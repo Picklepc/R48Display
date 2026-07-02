@@ -1,3 +1,20 @@
+# R48Display v0.3.4 — Release Notes
+
+**OTA from v0.3.0 or later is safe** — partition table is unchanged.
+
+## What's New in 0.3.4
+
+### Weather
+- Enter a US zip code in **Settings** to show current temperature and conditions on the clock face
+- 7-day forecast card added to the web dashboard
+- Respects the existing °F / °C temperature unit setting
+
+### ESP32-S3-Touch-LCD-1.85C compatibility
+- The 1.85C variant (the board with the large 28-pin GPIO header) now initializes the display correctly
+- Previous firmware held TCA9554 EXIO2 (the display reset line) HIGH on boot, causing horizontal stripe artifacts on this board — now correctly pulsed LOW before display init
+
+---
+
 # R48Display v0.3.2 — Release Notes
 
 **OTA from 0.3.0 or 0.3.1 is safe** — partition table is unchanged.

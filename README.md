@@ -41,6 +41,7 @@ detection behavior, and BMS profile from the web settings.
 - Maintenance reminder system with user-defined intervals and confirmation log.
 - Internal battery power management: adaptive BLE polling, LCD timeout, CPU
   and WiFi power saving when running from the onboard LiPo.
+- Weather display: current temperature and conditions on the clock face, 7-day forecast on the web dashboard (requires zip code in settings; uses Open-Meteo, no API key needed).
 - Selectable LCD rotation for alternate mounting angles.
 - Rotation-aware touchscreen swipe navigation for LCD pages.
 - Wi-Fi STA mode for normal use.
@@ -55,27 +56,39 @@ detection behavior, and BMS profile from the web settings.
 
 ## Color Schemes
 
-The same theme is applied to the browser UI and the LCD display:
+15 themes applied consistently across the browser UI and LCD display.
 
+**8 utility themes** (always available):
 - Chlorophyll Shift — green
 - Redline Charge — red
 - Violet Voltage — purple
 - Blue Fairway — blue
 - Orange Ignition — orange
-- Fabulous! — multicolored, bright, flamboyant, and deliberately loud
 - Pixel Fairway — retro
 - Modern Graphite — modern
+- Fabulous! — multicolored, bright, and deliberately loud
+
+**7 seasonal themes** (calendar order):
+- Be Mine — February
+- 'Murica — July (includes animated US flag + fireworks)
+- Starfield
+- Ghouls & Goblins — October
+- Turkey Trot — November
+- Jingle All The Way — December
+- Countdown — December 31
+
+Each theme pairs with a default background animation. Animations can be toggled and overridden independently from the web settings.
 
 Usage categories have default themes, but the theme can always be changed
 independently.
 
 ## Hardware Target
 
-- Waveshare ESP32-S3 Touch LCD 1.85.
+- Waveshare ESP32-S3 Touch LCD 1.85 (primary target).
+- Waveshare ESP32-S3 Touch LCD 1.85**C** (28-pin GPIO header variant) — fully compatible as of v0.3.4.
 - Works without SD card.
 - Works without the onboard battery populated.
 - Does not require gyro/IMU hardware.
-- Leaves the bottom GPIO connector variant open for future accessories.
 
 ## Pinout
 
