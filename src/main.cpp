@@ -2882,9 +2882,9 @@ void tcaSetOutput(uint8_t value) {
 bool initIoExpander() {
   bool ok = tcaWrite(0x03, 0xF0);
   ok = tcaWrite(0x02, 0x00) && ok;
-  tcaSetOutput(0x0C);
+  tcaSetOutput(0x08);  // EXIO3 HIGH (SD_CS desel); EXIO2 LOW for RST pulse (C board LCD RST)
   delay(30);
-  tcaSetOutput(0x0F);
+  tcaSetOutput(0x0F);  // Release all resets: EXIO0-2 HIGH, EXIO3 stays HIGH
   delay(150);
   if (!ok) Serial.println(F("IO expander: write failed — display may not initialize"));
   return ok;

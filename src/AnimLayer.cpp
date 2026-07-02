@@ -87,11 +87,13 @@ static void buildFlag(lv_obj_t *root) {
   // Canton — upper-left, 2/5 wide × 7 stripes tall (144×189)
   constexpr int16_t CW = FW * 2 / 5, CH = SH * 7;
   mkobj(FX, FY, CW, CH, 0x0A3161, 255, 0);
-  // Stars — 4×4 grid = 16 asterisk labels (Montserrat-48 "*" renders as a large 6-arm star)
+  // Stars — 9 rows alternating 6 and 5 (50 total, US flag pattern)
+  // Column pitch 24px (CW/6), row pitch 21px (CH/9)
+  // 5-star rows offset by half pitch (12px) to stagger between 6-star columns
   auto mkstar = [&](int16_t x, int16_t y) {
     lv_obj_t *s = lv_label_create(root);
     lv_label_set_text(s, "*");
-    lv_obj_set_style_text_font(s, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(s, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(s, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_opa(s, 230, 0);
     lv_obj_set_style_bg_opa(s, LV_OPA_TRANSP, 0);
@@ -99,8 +101,15 @@ static void buildFlag(lv_obj_t *root) {
     lv_obj_set_style_pad_all(s, 0, 0);
     lv_obj_set_pos(s, x, y);
   };
-  for (uint8_t i = 0; i < 16; ++i)
-    mkstar(FX + 4 + (i % 4) * 33, FY + 8 + (i / 4) * 43);
+  constexpr int16_t cpitch = CW / 6;  // 24px
+  constexpr int16_t rpitch = CH / 9;  // 21px
+  for (uint8_t row = 0; row < 9; ++row) {
+    const bool even = (row % 2 == 0);
+    const uint8_t ncols = even ? 6 : 5;
+    const int16_t x0 = FX + (even ? 2 : 14);  // 5-star rows offset by cpitch/2
+    for (uint8_t col = 0; col < ncols; ++col)
+      mkstar(x0 + col * cpitch, FY + 4 + row * rpitch);
+  }
 }
 
 // ─── Spawners — each returns ms until next event ─────────────────────────────
