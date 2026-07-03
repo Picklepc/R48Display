@@ -29,6 +29,7 @@ String dashboardBody() {
       "<div class='metric'><div class='label'>Health</div><div class='value' id='dash-health'>--</div></div>"
       "<div class='metric'><div class='label'>Maintenance</div><div class='value sm' id='dash-maintenance'>Not configured</div></div>"
       "<div class='metric'><div class='label'>BMS Link</div><div class='value sm' id='dash-link'>--</div></div>"
+      "<div class='metric' id='dash-pay-wrap' style='display:none'><div class='label'>Pay Pending</div><div class='value sm' id='dash-pay'>--</div></div>"
       "</section>"
       "<section class='card'>"
       "<h2>Battery Health</h2>"
@@ -315,6 +316,10 @@ String settingsBody() {
       "<span class='hint'>High-draw subset of Active Hours. Edit to reset or correct.</span>"
       "<input name='hours_working' type='number' min='0' max='99999' step='any'></label>"
       "</div>"
+      "<label class='check' id='track-hday-wrap'><input name='track_daily_activity' type='checkbox' id='trackHdayCb'> Track Daily Activity History"
+      "<span class='note'>Records daily hours to the activity heatmap on the Maintenance page. Requires a Wi-Fi network to be configured (uses NTP for day detection). Enabled by default once an SSID is saved.</span></label>"
+      "<label class='check'><input name='track_pay' type='checkbox' id='trackPayCb'> Enable Pay Records"
+      "<span class='note'>Shows the Pay Records section on the Maintenance page. Track payees, hourly rates, and working hours per period. Working hours are sourced from the activity history when available.</span></label>"
       "</div>"
 
       // Power Management
@@ -379,6 +384,27 @@ String settingsBody() {
 
 String maintenanceBody() {
   return F(
+      // Activity heatmap
+      "<section class='card wide' id='heatmap-card' style='display:none'>"
+      "<div class='section-head'>"
+      "<h2>Activity History</h2>"
+      "<div style='display:flex;gap:6px;align-items:center'>"
+      "<button id='hm-prev' onclick='hmNav(-1)' style='padding:4px 10px;line-height:1'>&#8592;</button>"
+      "<span id='hm-year' style='min-width:36px;text-align:center;font-weight:600;font-size:15px'></span>"
+      "<button id='hm-next' onclick='hmNav(1)' style='padding:4px 10px;line-height:1'>&#8594;</button>"
+      "<a id='hm-dl' href='/api/heatmap/export.csv' download style='margin-left:6px;border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:6px 10px;text-decoration:none;font:inherit;cursor:pointer;font-size:13px'>Export CSV</a>"
+      "</div></div>"
+      "<div style='overflow-x:auto;padding:6px 0 4px'><div id='hm-svg'></div></div>"
+      "<div id='hm-legend' style='display:flex;gap:10px;align-items:center;margin-top:6px;font-size:12px;color:var(--muted)'>"
+      "<span>Less</span>"
+      "<span id='hm-swatches'></span>"
+      "<span>More</span>"
+      "</div>"
+      "</section>"
+
+      // Floating tooltip (shared)
+      "<div id='hm-tip' style='display:none;position:fixed;z-index:300;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 14px;font-size:13px;pointer-events:none;box-shadow:0 4px 18px rgba(0,0,0,.45);max-width:260px'></div>"
+
       // Hours graph
       "<section class='card wide'>"
       "<h2>Hour Meter</h2>"
@@ -423,6 +449,65 @@ String maintenanceBody() {
       "</div></div>"
       "<div id='maint-list'><div class='empty'>Loading\xe2\x80\xa6</div></div>"
       "</section>"
+
+      // Pay Records
+      "<section class='card wide' id='pay-section' style='display:none'>"
+      "<div class='section-head'>"
+      "<h2>Pay Records</h2>"
+      "<div style='display:flex;gap:8px'>"
+      "<a href='/api/pay/export.csv' download style='border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:8px 11px;text-decoration:none;font:inherit;cursor:pointer;font-size:13px'>Export CSV</a>"
+      "<button class='primary' onclick='openPayForm(null)'>+ Add Payee</button>"
+      "</div></div>"
+      "<div id='pay-list'><div class='empty'>Loading\xe2\x80\xa6</div></div>"
+      "</section>"
+
+      // Pay add / edit modal
+      "<div id='pay-modal' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center'>"
+      "<div class='card' style='min-width:280px;max-width:420px;width:92%;padding:20px'>"
+      "<h3 id='pay-modal-title'>Add Payee</h3>"
+      "<div class='form-grid'>"
+      "<label>Payee Name<input id='pf-payee' maxlength='40' autocomplete='off' placeholder='Alex'></label>"
+      "<label>Hourly Rate<input id='pf-rate' type='number' min='0' step='0.01' placeholder='12.00'></label>"
+      "<label>Currency / Label<input id='pf-label' maxlength='8' autocomplete='off' placeholder='$'></label>"
+      "<label>Period Start Date<input id='pf-start' type='date'></label>"
+      "<label>Notes (optional)<input id='pf-notes' maxlength='80' autocomplete='off'></label>"
+      "</div>"
+      "<input type='hidden' id='pf-id' value='0'>"
+      "<div style='display:flex;gap:8px;margin-top:14px'>"
+      "<button class='primary' onclick='submitPayForm()'>Save</button>"
+      "<button onclick='closePayForm()'>Cancel</button>"
+      "</div>"
+      "</div>"
+      "</div>"
+
+      // Mark Paid modal
+      "<div id='pay-confirm-modal' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center'>"
+      "<div class='card' style='min-width:280px;max-width:420px;width:92%;padding:20px'>"
+      "<h3>Mark Paid \xe2\x80\x94 <span id='pc-payee'></span></h3>"
+      "<div id='pay-confirm-summary' style='background:var(--panel2);border-radius:8px;padding:12px;margin-bottom:14px;font-size:14px;line-height:1.7'></div>"
+      "<div class='form-grid'>"
+      "<label>Amount paid<span class='hint'>Leave blank to use the calculated amount. Enter a different value for bonuses or adjustments.</span>"
+      "<input id='pc-amount' type='number' min='0' step='0.01' placeholder='Leave blank to use calculated'></label>"
+      "<label>Notes<input id='pc-notes' maxlength='80' autocomplete='off' placeholder='e.g. paid in cash'></label>"
+      "</div>"
+      "<input type='hidden' id='pc-id' value='0'>"
+      "<div style='display:flex;gap:8px;margin-top:14px'>"
+      "<button class='primary' onclick='confirmPay()'>Confirm Payment</button>"
+      "<button onclick='closePayConfirm()'>Cancel</button>"
+      "</div>"
+      "</div>"
+      "</div>"
+
+      // Payment history overlay / drawer
+      "<div id='pay-hist-overlay' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100' onclick='closePayHist()'>"
+      "<div style='position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:600px;max-height:72vh;overflow-y:auto;background:var(--panel);border-radius:16px 16px 0 0;padding:20px' onclick='event.stopPropagation()'>"
+      "<div class='section-head' style='margin-bottom:14px'>"
+      "<h3 id='pay-hist-title'>Payment History</h3>"
+      "<button onclick='closePayHist()' style='font-size:20px;line-height:1;padding:0 8px'>&times;</button>"
+      "</div>"
+      "<div id='pay-hist-list'></div>"
+      "</div>"
+      "</div>"
 
       // Add / edit modal
       "<div id='maint-modal' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center'>"
@@ -778,10 +863,10 @@ async function refreshWeather() {
       if (fc && data.forecast) {
         fc.innerHTML = data.forecast.map(d =>
           `<div style='background:var(--panel2);border-radius:7px;padding:10px 12px;min-width:62px;text-align:center;flex:1'>`+
-          `<div style='font-size:11px;color:var(--muted);margin-bottom:4px'>${d.day}</div>`+
-          `<div style='font-size:11px;color:var(--text);margin-bottom:6px;line-height:1.2'>${d.cond}</div>`+
-          `<div style='font-size:15px;font-weight:600;color:var(--primary)'>${d.hi}</div>`+
-          `<div style='font-size:12px;color:var(--muted)'>${d.lo}</div>`+
+          `<div style='font-size:11px;color:var(--muted);margin-bottom:4px'>${escAttr(d.day)}</div>`+
+          `<div style='font-size:11px;color:var(--text);margin-bottom:6px;line-height:1.2'>${escAttr(d.cond)}</div>`+
+          `<div style='font-size:15px;font-weight:600;color:var(--primary)'>${escAttr(d.hi)}</div>`+
+          `<div style='font-size:12px;color:var(--muted)'>${escAttr(d.lo)}</div>`+
           `</div>`
         ).join('');
       }
@@ -839,6 +924,17 @@ async function loadSettings() {
   const animCb = document.getElementById('animEnabledCb');
   if (animCb) toggleAnimOptions(animCb.checked);
   updateThemeDescription();
+  // Grey out Track Daily Activity when no STA SSID is configured
+  const ssidEl = document.querySelector('[name="wifi_ssid"]');
+  const trackCb = document.getElementById('trackHdayCb');
+  const trackWrap = document.getElementById('track-hday-wrap');
+  function syncTrackHday() {
+    const has = ssidEl && ssidEl.value.trim().length > 0;
+    if (trackCb) trackCb.disabled = !has;
+    if (trackWrap) trackWrap.style.opacity = has ? '1' : '0.42';
+  }
+  if (ssidEl) ssidEl.addEventListener('input', syncTrackHday);
+  syncTrackHday();
 }
 
 async function scanWifi() {
@@ -846,7 +942,7 @@ async function scanWifi() {
   if (!host) return;
   host.innerHTML = '<div class="empty">Scanning...</div>';
   const data = await (await fetch('/api/wifi/scan')).json();
-  host.innerHTML = data.networks.map(n => `<button type="button" onclick="chooseWifi('${String(n.ssid).replaceAll("'", "\\'")}')">${n.ssid || '(hidden)'} <span>${n.rssi} dBm</span></button>`).join('') || '<div class="empty">No networks found</div>';
+  host.innerHTML = data.networks.map(n => `<button type="button" data-ssid="${escAttr(n.ssid||'')}" onclick="chooseWifi(this.dataset.ssid)">${escAttr(n.ssid || '(hidden)')} <span>${n.rssi} dBm</span></button>`).join('') || '<div class="empty">No networks found</div>';
 }
 
 async function scanBle() {
@@ -859,21 +955,20 @@ async function scanBle() {
     return;
   }
   host.innerHTML = data.devices.map(d => {
-    const name = String(d.name || '').replaceAll("'", "\\'");
-    const addr = String(d.address || '').replaceAll("'", "\\'");
+    const safeName = escAttr(d.name || '');
+    const safeAddr = escAttr(d.address || '');
     const profiles = Array.isArray(d.compatible_profiles) && d.compatible_profiles.length
       ? d.compatible_profiles
       : d.recommended_profile ? [d.recommended_profile] : [];
     const protoHtml = profiles.length
       ? profiles.map(pid => {
-          const safe = String(pid).replaceAll("'", "\\'");
           const plabel = d.recommended_profile === pid
             ? `${pid.replace(/_/g, ' ')} ★`
             : pid.replace(/_/g, ' ');
-          return `<button class="ble-proto" type="button" onclick="chooseBle('${name}','${addr}','${safe}')">${plabel}</button>`;
+          return `<button class="ble-proto" type="button" data-name="${safeName}" data-addr="${safeAddr}" data-proto="${escAttr(pid)}" onclick="chooseBle(this.dataset.name,this.dataset.addr,this.dataset.proto)">${escAttr(plabel)}</button>`;
         }).join('')
       : '<span class="hint">no compatible protocol found</span>';
-    return `<div class="ble-device"><div class="ble-name">${d.name || d.address}<span>${d.rssi} dBm</span></div><div class="ble-protos">${protoHtml}</div></div>`;
+    return `<div class="ble-device"><div class="ble-name">${escAttr(d.name || d.address)}<span>${d.rssi} dBm</span></div><div class="ble-protos">${protoHtml}</div></div>`;
   }).join('');
 }
 
@@ -968,6 +1063,8 @@ function wireActions() {
     data.advertise_ap_credentials = form.elements.advertise_ap_credentials.checked ? '1' : '0';
     data.anim_enabled = form.elements.anim_enabled.checked ? '1' : '0';
     data.anim_type = form.elements.anim_type ? form.elements.anim_type.value : '0';
+    data.track_daily_activity = form.elements.track_daily_activity.checked ? '1' : '0';
+    data.track_pay = form.elements.track_pay.checked ? '1' : '0';
     delete data.standby_hint;
     delete data.hours_counted;
     // Only send hours_baseline if the user actually changed it; otherwise let
@@ -996,14 +1093,206 @@ loadSettings().then(() => {
   const animCb = document.getElementById('animEnabledCb');
   if (animCb) toggleAnimOptions(animCb.checked);
 });
+// ── Pay stats (dashboard) ─────────────────────────────────────────────────────
+async function loadPayStats() {
+  const wrap = $('dash-pay-wrap');
+  const el   = $('dash-pay');
+  if (!wrap || !el) return;
+  const resp = await fetch('/api/pay',{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
+  if (!resp || !resp.track_pay || !resp.hday_enabled || !resp.records?.length) {
+    wrap.style.display = 'none'; return;
+  }
+  let total = 0;
+  resp.records.forEach(pr => { total += parseFloat(pr.earned)||0; });
+  wrap.style.display = '';
+  el.textContent = resp.records.length === 1
+    ? `${resp.records[0].label||'$'}${(parseFloat(resp.records[0].earned)||0).toFixed(2)}`
+    : `${resp.records[0].label||'$'}${total.toFixed(2)}`;
+}
+
 refresh();
 setInterval(refresh, 2500);
 refreshWeather();
 setInterval(refreshWeather, 5 * 60 * 1000);
 
+// ── Pay records ───────────────────────────────────────────────────────────────
+let _payRecords = [];
+
+function _fmtDate(ts) {
+  return ts ? new Date(ts * 1000).toLocaleDateString() : '&mdash;';
+}
+function _fmtAmt(lbl, amt) {
+  return `${escAttr(lbl)}${parseFloat(amt).toFixed(2)}`;
+}
+function _ymd(dt) {
+  return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+}
+
+async function loadPay() {
+  const section = $('pay-section');
+  const host    = $('pay-list');
+  if (!host) return;
+  const resp = await fetch('/api/pay',{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
+  if (!resp || !resp.track_pay) {
+    if (section) section.style.display = 'none';
+    return;
+  }
+  if (section) section.style.display = '';
+  const hdayOn = !!resp.hday_enabled;
+  _payRecords = resp.records || [];
+  if (!_payRecords.length) {
+    host.innerHTML = "<div class='empty'>No payees configured &mdash; add one above.</div>";
+    return;
+  }
+  host.innerHTML = _payRecords.map(pr => {
+    const workH    = parseFloat(pr.work_h) || 0;
+    const earned   = parseFloat(pr.earned) || 0;
+    const rate     = parseFloat(pr.rate)   || 0;
+    const lbl      = pr.label || '$';
+    const startTs  = parseInt(pr.period_start) || 0;
+    const earnStr  = hdayOn ? _fmtAmt(lbl, earned)        : '&mdash;';
+    const workStr  = hdayOn ? `${workH.toFixed(1)}\xa0h`  : '&mdash;';
+    const sinceStr = startTs ? _fmtDate(startTs) : 'Not set';
+    return `<div class='card' style='margin-bottom:10px'>
+      <div class='section-head' style='margin-bottom:8px'>
+        <div>
+          <span style='font-weight:700;font-size:16px'>${escAttr(pr.payee)}</span>
+          <span style='color:var(--muted);font-size:13px;margin-left:10px'>${rate > 0 ? escAttr(lbl) + rate.toFixed(2) + '/h' : 'Rate not set'}</span>
+        </div>
+        <div style='display:flex;gap:6px'>
+          <button onclick='openPayHist(${pr.id})' style='font-size:13px'>History</button>
+          <button onclick='openPayForm(${pr.id})' style='font-size:13px'>Edit</button>
+          <button onclick='deletePayRecord(${pr.id})' style='color:var(--bad);font-size:13px'>Delete</button>
+        </div>
+      </div>
+      <div class='dash-strip' style='margin:8px 0'>
+        <div class='metric'><div class='label'>Period Start</div><div class='value sm'>${sinceStr}</div></div>
+        <div class='metric'><div class='label'>Working Hours</div><div class='value'>${workStr}</div></div>
+        <div class='metric'><div class='label'>Earned</div><div class='value'>${earnStr}</div></div>
+      </div>
+      ${!hdayOn ? "<p style='font-size:12px;color:var(--muted);margin:4px 0 8px'>Enable activity tracking in Settings to record working hours.</p>" : ''}
+      ${pr.notes ? `<p style='font-size:12px;color:var(--muted);margin:6px 0 8px'>${escAttr(pr.notes)}</p>` : ''}
+      <button class='primary' style='margin-top:4px' onclick='openPayConfirm(${pr.id})'>Mark Paid</button>
+    </div>`;
+  }).join('');
+}
+
+function openPayForm(id) {
+  const pr = id ? _payRecords.find(p => p.id == id) : null;
+  $('pf-id').value    = pr ? pr.id : '0';
+  $('pf-payee').value = pr ? pr.payee : '';
+  $('pf-rate').value  = pr ? parseFloat(pr.rate).toFixed(2) : '';
+  $('pf-label').value = pr ? pr.label : '$';
+  $('pf-notes').value = pr ? pr.notes : '';
+  const ts = pr ? parseInt(pr.period_start) : 0;
+  $('pf-start').value = _ymd(ts ? new Date(ts * 1000) : new Date());
+  $('pay-modal-title').textContent = pr ? `Edit — ${pr.payee}` : 'Add Payee';
+  $('pay-modal').style.display = 'flex';
+}
+function closePayForm() { $('pay-modal').style.display = 'none'; }
+
+async function submitPayForm() {
+  const startVal = $('pf-start').value;
+  const startTs  = startVal ? Math.floor(new Date(startVal + 'T00:00:00').getTime() / 1000) : 0;
+  const body = {
+    id:           parseInt($('pf-id').value) || 0,
+    payee:        $('pf-payee').value.trim(),
+    rate:         parseFloat($('pf-rate').value) || 0,
+    label:        $('pf-label').value.trim() || '$',
+    period_start: startTs,
+    notes:        $('pf-notes').value.trim(),
+  };
+  if (!body.payee) { alert('Payee name is required'); return; }
+  const res = await fetch('/api/pay', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+  }).catch(()=>null);
+  if (!res?.ok) { alert('Failed to save payee'); return; }
+  closePayForm();
+  loadPay();
+}
+
+async function deletePayRecord(id) {
+  const pr = _payRecords.find(p => p.id == id);
+  if (!confirm(`Delete ${pr?.payee || 'this payee'} and all payment history? This cannot be undone.`)) return;
+  await fetch(`/api/pay?id=${id}`, {method:'DELETE'});
+  loadPay();
+}
+
+function openPayConfirm(id) {
+  const pr = _payRecords.find(p => p.id == id);
+  if (!pr) return;
+  $('pc-id').value          = pr.id;
+  $('pc-payee').textContent = pr.payee;
+  $('pc-amount').value = '';
+  $('pc-notes').value  = '';
+  const lbl    = pr.label || '$';
+  const workH  = parseFloat(pr.work_h) || 0;
+  const earned = parseFloat(pr.earned) || 0;
+  const since  = parseInt(pr.period_start) ? _fmtDate(parseInt(pr.period_start)) : '&mdash;';
+  $('pay-confirm-summary').innerHTML =
+    `<div><b>Period:</b> ${since} &rarr; today</div>` +
+    `<div><b>Working hours:</b> ${workH.toFixed(1)}\xa0h</div>` +
+    `<div><b>Calculated:</b> ${_fmtAmt(lbl, earned)}</div>`;
+  $('pay-confirm-modal').style.display = 'flex';
+}
+function closePayConfirm() { $('pay-confirm-modal').style.display = 'none'; }
+
+async function confirmPay() {
+  const id     = parseInt($('pc-id').value);
+  const amtRaw = $('pc-amount').value.trim();
+  const body   = { id, notes: $('pc-notes').value.trim() };
+  if (amtRaw !== '') body.amount = parseFloat(amtRaw);
+  const res = await fetch('/api/pay/confirm', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+  }).catch(()=>null);
+  if (!res?.ok) {
+    const e = await res?.json().catch(()=>null);
+    alert(e?.error === 'no_time'
+      ? 'Clock not synced — payment not recorded.'
+      : 'Payment confirmation failed.');
+    return;
+  }
+  const d = await res.json();
+  closePayConfirm();
+  alert(`Recorded: ${parseFloat(d.work_h).toFixed(1)}\xa0h worked — period reset.`);
+  loadPay();
+  loadPayStats();
+}
+
+async function openPayHist(id) {
+  const pr = _payRecords.find(p => p.id == id);
+  if (!pr) return;
+  $('pay-hist-title').textContent = `${pr.payee} — Payment History`;
+  $('pay-hist-overlay').style.display = 'flex';
+  const host = $('pay-hist-list');
+  host.innerHTML = "<div class='empty'>Loading&hellip;</div>";
+  const hist = await fetch(`/api/pay/history?id=${id}`,{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
+  if (!hist?.length) {
+    host.innerHTML = "<div class='empty'>No payments recorded yet.</div>";
+    return;
+  }
+  const lbl = pr.label || '$';
+  host.innerHTML = [...hist].reverse().map(e => {
+    const from = _fmtDate(e.from_ts);
+    const to   = _fmtDate(e.to_ts);
+    return `<div style='display:flex;justify-content:space-between;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line)'>
+      <div>
+        <div style='font-size:13px;color:var(--muted)'>${from} &rarr; ${to}</div>
+        ${e.notes ? `<div style='font-size:12px;color:var(--muted);margin-top:2px'>${escAttr(e.notes)}</div>` : ''}
+      </div>
+      <div style='text-align:right;flex-shrink:0;margin-left:14px'>
+        <div style='font-weight:700'>${_fmtAmt(lbl, e.amount)}</div>
+        <div style='font-size:12px;color:var(--muted)'>${parseFloat(e.work_h).toFixed(1)}\xa0h</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function closePayHist() { $('pay-hist-overlay').style.display = 'none'; }
+
 // ── Maintenance tracker ───────────────────────────────────────────────────
 const MAINT_TYPE_LABELS = {HOURS_ACTIVE:'Active Hours',HOURS_WORKING:'Working Hours',HOURS_TOTAL:'Total Hours',DAYS:'Days'};
 const MAINT_TYPE_UNIT   = {HOURS_ACTIVE:'h',HOURS_WORKING:'h',HOURS_TOTAL:'h',DAYS:'d'};
+let _maintItems = [];
 
 function renderMachineFields(fields = machineFields) {
   const host = $('machine-fields');
@@ -1139,6 +1428,7 @@ async function loadMaintenance() {
   const host = $('maint-list');
   if (!host) return;
   const items = await fetch('/api/maintenance',{cache:'no-store'}).then(r=>r.json()).catch(()=>[]);
+  _maintItems = items;
   if (!items.length) { host.innerHTML="<div class='empty'>No maintenance items — add one above.</div>"; return; }
   host.innerHTML = items.map(it => {
     const pct = Math.min(100, parseFloat(it.pct)||0);
@@ -1147,23 +1437,24 @@ async function loadMaintenance() {
     const remaining = parseFloat(it.remaining)||0;
     const unit = MAINT_TYPE_UNIT[it.type]||'h';
     const typeLabel = MAINT_TYPE_LABELS[it.type]||it.type;
+    const notStarted = it.type === 'DAYS' && parseInt(it.last_reset_ts) === 0;
     const overdueTag = it.overdue ? "<span style='color:var(--bad);font-weight:700'> OVERDUE</span>" : '';
     return `<div class='card' style='margin-bottom:10px'>
       <div class='section-head' style='margin-bottom:8px'>
-        <span style='font-weight:600'>${it.name}${overdueTag}</span>
+        <span style='font-weight:600'>${escAttr(it.name)}${overdueTag}</span>
         <span style='color:var(--muted);font-size:12px'>${typeLabel}</span>
       </div>
       <div style='background:var(--line);border-radius:4px;height:8px;margin-bottom:8px'>
         <div style='background:${barColor};border-radius:4px;height:8px;width:${pct}%;transition:width .4s'></div>
       </div>
       <div style='display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:10px'>
-        <span>${elapsed.toFixed(1)}${unit} elapsed</span>
-        <span>${it.overdue ? 'overdue' : remaining.toFixed(1)+unit+' left'} / ${parseFloat(it.interval).toFixed(0)}${unit}</span>
+        <span>${notStarted ? 'Not started' : elapsed.toFixed(1)+unit+' elapsed'}</span>
+        <span>${notStarted ? 'Every '+parseFloat(it.interval).toFixed(0)+unit : it.overdue ? 'overdue' : remaining.toFixed(1)+unit+' left / '+parseFloat(it.interval).toFixed(0)+unit}</span>
       </div>
-      ${it.notes ? `<div style='font-size:12px;color:var(--muted);margin-bottom:8px'>${it.notes}</div>` : ''}
+      ${it.notes ? `<div style='font-size:12px;color:var(--muted);margin-bottom:8px'>${escAttr(it.notes)}</div>` : ''}
       <div style='display:flex;gap:8px;flex-wrap:wrap'>
-        <button onclick='openConfirmModal(${it.id},${JSON.stringify(it.name)})' class='primary'>Mark Done</button>
-        <button onclick='openMaintForm(${JSON.stringify(it)})'>Edit</button>
+        <button onclick='openConfirmModal(${it.id})' class='primary'>Mark Done</button>
+        <button onclick='openMaintForm(${it.id})'>Edit</button>
         <button onclick='toggleHistory(${it.id},this)'>&#9658; History</button>
         <button onclick='deleteMaint(${it.id})' style='color:var(--bad)'>Delete</button>
       </div>
@@ -1172,9 +1463,10 @@ async function loadMaintenance() {
   }).join('');
 }
 
-function openConfirmModal(id, name) {
+function openConfirmModal(id) {
+  const it = _maintItems.find(x => x.id == id);
   $('mc-id').value = id;
-  $('mc-name').textContent = 'Mark Done — ' + name;
+  $('mc-name').textContent = 'Mark Done — ' + (it ? it.name : '');
   $('mc-notes').value = '';
   $('maint-confirm-modal').style.display = 'flex';
   $('mc-notes').focus();
@@ -1282,7 +1574,9 @@ async function deleteHistoryEntry(itemId, ts) {
   if (panel) await loadItemHistory(itemId, panel);
 }
 
-function openMaintForm(item) {
+function openMaintForm(idOrNull) {
+  const item = typeof idOrNull === 'number'
+    ? _maintItems.find(x => x.id == idOrNull) : null;
   $('maint-modal-title').textContent = item ? 'Edit Item' : 'Add Item';
   $('mf-id').value = item ? item.id : 0;
   $('mf-name').value = item ? item.name : '';
@@ -1323,12 +1617,136 @@ async function deleteMaint(id) {
   loadMaintenance();
 }
 
+// ── Activity heatmap ──────────────────────────────────────────────────────────
+let _hmData = null;       // full API response
+let _hmYear  = 0;
+let _hmMaint = {};        // { "YYYY-MM-DD": ["Item A", ...] }
+const HM_CELL = 11, HM_GAP = 2, HM_PITCH = 13;
+const HM_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const HM_DAYS   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+async function initHeatmap() {
+  const card = $('heatmap-card');
+  if (!card) return;
+  const raw = await fetch('/api/heatmap', {cache:'no-store'}).then(r => r.ok ? r.json() : null).catch(() => null);
+  if (!raw) return;
+  _hmData = raw;
+  _hmYear = raw.cur_year;
+  // Build maint-by-date index from all history
+  const items = await fetch('/api/maintenance', {cache:'no-store'}).then(r => r.json()).catch(() => []);
+  await Promise.all(items.map(async it => {
+    const h = await fetch('/api/maintenance/history?id='+it.id, {cache:'no-store'}).then(r => r.json()).catch(() => null);
+    if (!h || !h.entries) return;
+    for (const e of h.entries) {
+      if (!e.ts) continue;
+      const key = _ymd(new Date(e.ts * 1000));
+      (_hmMaint[key] = _hmMaint[key] || []).push(it.name);
+    }
+  }));
+  card.style.display = '';
+  renderHeatmap();
+}
+
+function hmNav(dir) {
+  if (!_hmData) return;
+  const years = Object.keys(_hmData.years).map(Number).sort((a,b)=>a-b);
+  const idx = years.indexOf(_hmYear) + dir;
+  if (idx < 0 || idx >= years.length) return;
+  _hmYear = years[idx];
+  renderHeatmap();
+}
+
+function renderHeatmap() {
+  const svg = $('hm-svg');
+  if (!svg || !_hmData) return;
+  const year  = _hmYear;
+  const ydata = (_hmData.years[String(year)] || []);
+  const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const totalDays = isLeap ? 366 : 365;
+  const jan1Dow = new Date(year, 0, 1).getDay();
+  const numCols = Math.ceil((totalDays + jan1Dow) / 7);
+  const LEFT = 26, TOP = 18;
+  const W = LEFT + numCols * HM_PITCH + 2;
+  const H = TOP + 7 * HM_PITCH + 4;
+  const aLbl = escAttr(_hmData.active_label || 'Active');
+  const wLbl = escAttr(_hmData.work_label  || 'Working');
+  // Color levels: 0=empty, 1=standby, 2=active, 3=working-light, 4=working-heavy
+  const OPAS = ['0.28','0.50','0.74','1.0'];  // levels 1-4 (level 0 uses --line)
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" style="display:block">`;
+  // Day-of-week labels (Mon, Wed, Fri)
+  for (let r = 0; r < 7; r++) {
+    if (r % 2 === 1) out += `<text x="${LEFT-3}" y="${TOP+r*HM_PITCH+HM_CELL-1}" text-anchor="end" font-size="9" fill="var(--muted)">${HM_DAYS[r]}</text>`;
+  }
+  // Month labels and cells
+  let lastMonth = -1;
+  for (let d = 0; d < totalDays; d++) {
+    const col = Math.floor((d + jan1Dow) / 7);
+    const row = (d + jan1Dow) % 7;
+    const x = LEFT + col * HM_PITCH;
+    const y = TOP  + row * HM_PITCH;
+    const dt = new Date(year, 0, d + 1);
+    const mo = dt.getMonth();
+    if (mo !== lastMonth) { lastMonth = mo; out += `<text x="${x}" y="${TOP-4}" font-size="9" fill="var(--muted)">${HM_MONTHS[mo]}</text>`; }
+    const sta = (ydata[d*4+0]||0)/10, act = (ydata[d*4+1]||0)/10, wrk = (ydata[d*4+2]||0)/10;
+    const lvl = wrk>=3?4 : wrk>0?3 : act>0?2 : sta>0?1 : 0;
+    const ds = _ymd(dt);
+    const cellFill = lvl===0 ? `fill="var(--line)" fill-opacity="1"` : `fill="var(--primary)" fill-opacity="${OPAS[lvl-1]}"`;
+    out += `<rect class="hmc" data-d="${ds}" data-s="${sta.toFixed(1)}" data-a="${act.toFixed(1)}" data-w="${wrk.toFixed(1)}" data-al="${aLbl}" data-wl="${wLbl}" x="${x}" y="${y}" width="${HM_CELL}" height="${HM_CELL}" rx="2" ${cellFill}/>`;
+  }
+  out += '</svg>';
+  svg.innerHTML = out;
+  // Year nav state
+  const $y = $('hm-year'); if ($y) $y.textContent = year;
+  const years = Object.keys(_hmData.years).map(Number).sort((a,b)=>a-b);
+  const idx = years.indexOf(year);
+  const prev = $('hm-prev'); if (prev) prev.disabled = idx <= 0;
+  const next = $('hm-next'); if (next) next.disabled = idx >= years.length - 1;
+  // Legend swatches
+  const sw = $('hm-swatches');
+  if (sw) sw.innerHTML =
+    `<span style="display:inline-block;width:${HM_CELL}px;height:${HM_CELL}px;border-radius:2px;background:var(--line);vertical-align:middle"></span>` +
+    [0.28,0.50,0.74,1.0].map(o=>`<span style="display:inline-block;width:${HM_CELL}px;height:${HM_CELL}px;border-radius:2px;background:var(--primary);opacity:${o};vertical-align:middle"></span>`).join('');
+  // Hover
+  svg.querySelectorAll('.hmc').forEach(r => {
+    r.addEventListener('mouseenter', hmTipShow);
+    r.addEventListener('mouseleave', hmTipHide);
+  });
+}
+
+function hmTipShow(e) {
+  const r = e.target, ds = r.dataset.d;
+  const sta = parseFloat(r.dataset.s), act = parseFloat(r.dataset.a), wrk = parseFloat(r.dataset.w);
+  const aLbl = escAttr(r.dataset.al || 'Active'), wLbl = escAttr(r.dataset.wl || 'Working');
+  const dt = new Date(ds + 'T12:00:00');
+  const maints = (_hmMaint[ds] || []);
+  let html = `<div style="font-weight:600;margin-bottom:6px">${HM_DAYS[dt.getDay()]}, ${HM_MONTHS[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}</div>`;
+  html += `<table style="border-collapse:collapse;font-size:12px;width:100%">`;
+  html += `<tr><td style="color:var(--muted);padding:1px 10px 1px 0">Standby</td><td>${sta.toFixed(1)} h</td></tr>`;
+  html += `<tr><td style="color:var(--muted);padding:1px 10px 1px 0">${aLbl}</td><td>${(act-wrk).toFixed(1)} h</td></tr>`;
+  html += `<tr><td style="color:var(--muted);padding:1px 10px 1px 0">${wLbl}</td><td>${wrk.toFixed(1)} h</td></tr>`;
+  if (maints.length) html += `<tr><td colspan="2" style="padding-top:6px;color:var(--primary);font-size:11px">${maints.map(escAttr).join(', ')}</td></tr>`;
+  html += '</table>';
+  const tip = $('hm-tip');
+  tip.innerHTML = html; tip.style.display = 'block';
+  const cr = e.target.getBoundingClientRect(), tr = tip.getBoundingClientRect();
+  let lx = cr.left + window.scrollX + HM_CELL/2 - tr.width/2;
+  let ly = cr.top  + window.scrollY - tr.height - 8;
+  if (ly < window.scrollY + 4) ly = cr.bottom + window.scrollY + 8;
+  if (lx < 4) lx = 4;
+  if (lx + tr.width > window.innerWidth - 4) lx = window.innerWidth - tr.width - 4;
+  tip.style.left = lx+'px'; tip.style.top = ly+'px';
+}
+function hmTipHide() { const t=$('hm-tip'); if(t) t.style.display='none'; }
+
 if ($('maint-list')) {
   loadMachineInfo();
   $('machine-form')?.addEventListener('submit', saveMachineInfo);
   loadMaintHours();
   loadMaintenance();
+  loadPay();
+  initHeatmap();
 }
+if ($('dash-pay-wrap')) loadPayStats();
 )JS");
 }
 

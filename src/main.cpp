@@ -296,6 +296,8 @@ struct AppSettings {
   String zipCode;
   float weatherLat = 0.0f;
   float weatherLon = 0.0f;
+  bool trackDailyActivity = true;
+  bool trackPay           = false;
 };
 
 struct BatterySample {
@@ -477,6 +479,12 @@ float hoursStandby = 0.0f;
 float hoursActive = 0.0f;
 float hoursWorking = 0.0f;
 float sessionActiveHours = 0.0f;
+uint32_t lastKnownTs = 0;       // Unix ts saved to NVS; restored on boot as RTC seed
+static float    hdaySnapSta  = 0.0f;
+static float    hdaySnapAct  = 0.0f;
+static float    hdaySnapWrk  = 0.0f;
+static int      hdaySnapYday = -1;
+static int      hdaySnapYear = 0;
 uint32_t lastHoursTickMs = 0;
 uint32_t lastHoursSaveMs = 0;
 bool previousCharging = false;
@@ -2349,19 +2357,20 @@ void apiMaintenanceGet() {
 }
 
 void apiMaintenancePost() {
-  const String name = server.arg("name");
+  const String name = sanitizeInfoText(server.arg("name"), 40);
   if (name.isEmpty()) { server.send(400, "text/plain", "name required"); return; }
   const String typeStr = server.arg("type");
   const float interval = server.arg("interval").toFloat();
   if (interval <= 0.0f) { server.send(400, "text/plain", "interval must be > 0"); return; }
   const uint8_t id = static_cast<uint8_t>(server.arg("id").toInt());
+  const String notes = sanitizeInfoText(server.arg("notes"), 80);
   MaintenanceItem *existing = nullptr;
   for (auto &it : maintenanceItems) if (it.id == id) { existing = &it; break; }
   if (existing) {
     existing->name = name;
     existing->type = maintTypeFromStr(typeStr.c_str());
     existing->interval = interval;
-    existing->notes = server.arg("notes");
+    existing->notes = notes;
   } else {
     if (maintenanceItems.size() >= 20) { server.send(400, "text/plain", "max 20 items"); return; }
     MaintenanceItem item;
@@ -2370,7 +2379,7 @@ void apiMaintenancePost() {
     item.name = name;
     item.type = maintTypeFromStr(typeStr.c_str());
     item.interval = interval;
-    item.notes = server.arg("notes");
+    item.notes = notes;
     maintenanceItems.push_back(item);
     existing = &maintenanceItems.back();
   }
@@ -2393,7 +2402,7 @@ void apiMaintenanceConfirm() {
   MaintenanceHistoryEntry entry;
   entry.ts    = now;
   entry.val   = val;
-  entry.notes = server.arg("notes");
+  entry.notes = sanitizeInfoText(server.arg("notes"), 200);
   hist.push_back(entry);
   if (hist.size() > MAINT_HISTORY_MAX)
     hist.erase(hist.begin(), hist.begin() + (hist.size() - MAINT_HISTORY_MAX));
@@ -2497,8 +2506,571 @@ void apiMaintenanceHistoryUpdate() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+// ── Activity heatmap (daily history) ─────────────────────────────────────────
+static String csvEscape(const String &s);  // forward decl; defined after maintenance export
+static bool   hdayEnabled();               // forward decl; defined with heatmap helpers below
+static bool   isLeapYear(int y);           // forward decl
+static int    daysInYear(int y);           // forward decl
+
+static String jsonEscape(const String &s) {
+  String out;
+  out.reserve(s.length() + 4);
+  for (char c : s) {
+    if (c == '"' || c == '\\') { out += '\\'; out += c; }
+    else if (static_cast<uint8_t>(c) >= 0x20) out += c;
+  }
+  return out;
+}
+
+static float blobGet(const std::vector<uint8_t>& b, int yday, int byteOffset) {
+  const int idx = yday * 4 + byteOffset;
+  return (idx >= 0 && idx < (int)b.size()) ? b[idx] / 10.0f : 0.0f;
+}
+
+static bool isLeapYear(int y) {
+  return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+}
+static int daysInYear(int y) { return isLeapYear(y) ? 366 : 365; }
+
+static bool hdayEnabled() {
+  return settings.trackDailyActivity && !settings.wifiSsid.isEmpty();
+}
+
+void initHdaySnapshot() {
+  if (!hdayEnabled()) return;
+  Preferences p;
+  if (!p.begin("r48disp", true)) return;
+  hdaySnapSta  = p.getFloat("hdSnapSta", hoursStandby);
+  hdaySnapAct  = p.getFloat("hdSnapAct", hoursActive);
+  hdaySnapWrk  = p.getFloat("hdSnapWrk", hoursWorking);
+  hdaySnapYday = p.getInt("hdSnapDay", -1);
+  hdaySnapYear = p.getInt("hdSnapYr",  0);
+  p.end();
+}
+
+static void saveHdaySnapshot() {
+  Preferences p;
+  if (!p.begin("r48disp", false)) return;
+  p.putFloat("hdSnapSta", hdaySnapSta);
+  p.putFloat("hdSnapAct", hdaySnapAct);
+  p.putFloat("hdSnapWrk", hdaySnapWrk);
+  p.putInt("hdSnapDay",   hdaySnapYday);
+  p.putInt("hdSnapYr",    hdaySnapYear);
+  p.end();
+}
+
+static void saveHdayRecord(int year, int yday, float sta, float act, float wrk) {
+  const int days = daysInYear(year);
+  if (yday < 0 || yday >= days) return;
+  Preferences p;
+  if (!p.begin("r48disp", false)) return;
+  char key[12];
+  snprintf(key, sizeof(key), "hday_%d", year);
+  std::vector<uint8_t> buf(static_cast<size_t>(days * 4), 0);
+  const size_t stored = p.getBytesLength(key);
+  if (stored == static_cast<size_t>(days * 4)) p.getBytes(key, buf.data(), stored);
+  buf[yday * 4 + 0] = static_cast<uint8_t>(min(255.0f, sta * 10.0f));
+  buf[yday * 4 + 1] = static_cast<uint8_t>(min(255.0f, act * 10.0f));
+  buf[yday * 4 + 2] = static_cast<uint8_t>(min(255.0f, wrk * 10.0f));
+  // byte 3 reserved for future flags (charge cycle etc.)
+  p.putBytes(key, buf.data(), buf.size());
+  p.end();
+}
+
+void checkHdayRollover() {
+  if (!hdayEnabled()) return;
+  static uint32_t lastHdayCheckMs = 0;
+  const uint32_t nowMs = millis();
+  if (nowMs - lastHdayCheckMs < 60000UL) return;
+  lastHdayCheckMs = nowMs;
+  struct tm ti;
+  if (!getLocalTime(&ti, 0)) return;
+  const int nowYear = ti.tm_year + 1900;
+  const int nowYday = ti.tm_yday;
+  if (hdaySnapYday < 0) {
+    // First valid time read — seed snapshot without writing a record
+    hdaySnapSta  = hoursStandby;
+    hdaySnapAct  = hoursActive;
+    hdaySnapWrk  = hoursWorking;
+    hdaySnapYday = nowYday;
+    hdaySnapYear = nowYear;
+    saveHdaySnapshot();
+    return;
+  }
+  if (nowYear == hdaySnapYear && nowYday == hdaySnapYday) return;
+  // Day rolled over: save the completed day then advance the snapshot
+  const float dSta = max(0.0f, hoursStandby - hdaySnapSta);
+  const float dAct = max(0.0f, hoursActive   - hdaySnapAct);
+  const float dWrk = max(0.0f, hoursWorking  - hdaySnapWrk);
+  saveHdayRecord(hdaySnapYear, hdaySnapYday, dSta, dAct, dWrk);
+  hdaySnapSta  = hoursStandby;
+  hdaySnapAct  = hoursActive;
+  hdaySnapWrk  = hoursWorking;
+  hdaySnapYday = nowYday;
+  hdaySnapYear = nowYear;
+  saveHdaySnapshot();
+}
+
+void apiHeatmapGet() {
+  if (!hdayEnabled()) { server.send(404, "application/json", F("{\"error\":\"disabled\"}")); return; }
+  struct tm ti;
+  if (!getLocalTime(&ti, 50)) { server.send(503, "application/json", F("{\"error\":\"no_time\"}")); return; }
+  const int curYear = ti.tm_year + 1900;
+  const int curYday = ti.tm_yday;
+  // Collect years that have data plus the current year
+  std::vector<int> years;
+  {
+    Preferences p;
+    if (p.begin("r48disp", true)) {
+      for (int y = curYear - 20; y <= curYear; y++) {
+        char key[12]; snprintf(key, sizeof(key), "hday_%d", y);
+        if (p.getBytesLength(key) > 0 || y == curYear) years.push_back(y);
+      }
+      p.end();
+    }
+  }
+  if (years.empty()) years.push_back(curYear);
+  server.sendHeader("Cache-Control", "no-cache");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  const String &aLbl = settings.labelActive;
+  const String &wLbl = settings.labelWorking;
+  server.sendContent(F("{\"cur_year\":"));
+  server.sendContent(String(curYear));
+  server.sendContent(F(",\"cur_yday\":"));
+  server.sendContent(String(curYday));
+  server.sendContent(F(",\"active_label\":\""));
+  server.sendContent(jsonEscape(aLbl));
+  server.sendContent(F("\",\"work_label\":\""));
+  server.sendContent(jsonEscape(wLbl));
+  server.sendContent(F("\",\"years\":{"));
+  bool firstYear = true;
+  for (int year : years) {
+    if (!firstYear) server.sendContent(",");
+    firstYear = false;
+    const int days = daysInYear(year);
+    std::vector<uint8_t> buf(static_cast<size_t>(days * 4), 0);
+    {
+      char key[12]; snprintf(key, sizeof(key), "hday_%d", year);
+      Preferences p;
+      if (p.begin("r48disp", true)) {
+        const size_t stored = p.getBytesLength(key);
+        if (stored == static_cast<size_t>(days * 4)) p.getBytes(key, buf.data(), stored);
+        p.end();
+      }
+    }
+    server.sendContent("\"");
+    server.sendContent(String(year));
+    server.sendContent("\":[");
+    // Send day data in 64-day batches; 1 sendContent call per batch instead of
+    // ~7 per day, which previously caused heap fragmentation from thousands of
+    // rapid malloc/free cycles inside sendContent's chunk-header allocation.
+    for (int d = 0; d < days; d += 64) {
+      const int end = min(d + 64, days);
+      String chunk;
+      chunk.reserve(static_cast<unsigned int>((end - d) * 17 + 2));
+      for (int i = d; i < end; i++) {
+        if (i > 0) chunk += ',';
+        char tmp[16];
+        snprintf(tmp, sizeof(tmp), "%u,%u,%u,%u",
+                 (unsigned)buf[i*4+0], (unsigned)buf[i*4+1],
+                 (unsigned)buf[i*4+2], (unsigned)buf[i*4+3]);
+        chunk += tmp;
+      }
+      server.sendContent(chunk);
+      yield();
+    }
+    server.sendContent("]");
+  }
+  server.sendContent("}}");
+}
+
+void apiHeatmapExport() {
+  if (!hdayEnabled()) { server.send(404, "text/plain", F("Tracking disabled")); return; }
+  // Build date → maintenance items index
+  std::map<String, std::vector<String>> maintByDate;
+  for (const auto &item : maintenanceItems) {
+    loadMaintenanceHistoryFor(item.id);
+    const auto hit = maintHistory.find(item.id);
+    if (hit == maintHistory.end()) continue;
+    for (const auto &e : hit->second) {
+      if (!e.ts) continue;
+      time_t t = static_cast<time_t>(e.ts);
+      struct tm tm; char ds[12] = "";
+      if (localtime_r(&t, &tm)) strftime(ds, sizeof(ds), "%Y-%m-%d", &tm);
+      if (ds[0]) maintByDate[String(ds)].push_back(item.name);
+    }
+  }
+  struct tm ti;
+  if (!getLocalTime(&ti, 50)) { server.send(503, "text/plain", F("No time")); return; }
+  const int curYear = ti.tm_year + 1900;
+  const int curYday = ti.tm_yday;
+  int firstYear = curYear;
+  {
+    Preferences p;
+    if (p.begin("r48disp", true)) {
+      for (int y = curYear - 20; y <= curYear; y++) {
+        char key[12]; snprintf(key, sizeof(key), "hday_%d", y);
+        if (p.getBytesLength(key) > 0) { firstYear = y; break; }
+      }
+      p.end();
+    }
+  }
+  const String &staLbl = settings.labelStandby;
+  const String &actLbl = settings.labelActive;
+  const String &wrkLbl = settings.labelWorking;
+  server.sendHeader("Content-Disposition", "attachment; filename=\"activity_history.csv\"");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/csv", "");
+  server.sendContent("Date," + csvEscape(staLbl + " (h)") + ',' + csvEscape(actLbl + " (h)") + ',' +
+                     csvEscape(wrkLbl + " (h)") + ",Maintenance\n");
+  for (int year = firstYear; year <= curYear; year++) {
+    const int days = daysInYear(year);
+    std::vector<uint8_t> buf(static_cast<size_t>(days * 4), 0);
+    {
+      char key[12]; snprintf(key, sizeof(key), "hday_%d", year);
+      Preferences p;
+      if (p.begin("r48disp", true)) {
+        const size_t stored = p.getBytesLength(key);
+        if (stored == static_cast<size_t>(days * 4)) p.getBytes(key, buf.data(), stored);
+        p.end();
+      }
+    }
+    for (int d = 0; d < days; d++) {
+      if (year == curYear && d > curYday) break;
+      const float sta = buf[d*4+0] / 10.0f;
+      const float act = buf[d*4+1] / 10.0f;
+      const float wrk = buf[d*4+2] / 10.0f;
+      struct tm dt = {};
+      dt.tm_year = year - 1900; dt.tm_mon = 0; dt.tm_mday = d + 1;
+      mktime(&dt);
+      char ds[12]; strftime(ds, sizeof(ds), "%Y-%m-%d", &dt);
+      const auto mit = maintByDate.find(String(ds));
+      const bool hasMaint = (mit != maintByDate.end());
+      if (sta == 0 && act == 0 && wrk == 0 && !hasMaint) continue;
+      String maintStr;
+      if (hasMaint) {
+        for (size_t i = 0; i < mit->second.size(); i++) {
+          if (i) maintStr += "; ";
+          maintStr += mit->second[i];
+        }
+      }
+      server.sendContent(String(ds) + ',' + String(sta, 1) + ',' + String(act, 1) + ',' +
+                         String(wrk, 1) + ',' + csvEscape(maintStr) + '\n');
+      yield();
+    }
+  }
+}
+
+// ── Pay records ───────────────────────────────────────────────────────────────
+
+struct PayRecord {
+  uint8_t  id          = 0;
+  String   payee;
+  float    rate        = 0.0f;
+  String   label       = "$";
+  uint32_t periodStart = 0;
+  String   notes;
+};
+
+struct PayHistoryEntry {
+  uint32_t fromTs = 0;
+  uint32_t toTs   = 0;
+  float    workH  = 0.0f;
+  float    amount = 0.0f;
+  String   notes;
+};
+
+static constexpr uint8_t PAY_HISTORY_MAX = 20;
+std::vector<PayRecord>   payRecords;
+std::map<uint8_t, std::vector<PayHistoryEntry>> payHistory;
+
+static uint8_t nextPayId() {
+  for (uint8_t id = 1; id < 32; id++) {
+    bool used = false;
+    for (const auto &pr : payRecords) if (pr.id == id) { used = true; break; }
+    if (!used) return id;
+  }
+  return 0;
+}
+
+void loadPayRecords() {
+  prefs.begin("r48disp", true);
+  const String json = prefs.getString("pay", "[]");
+  prefs.end();
+  JsonDocument doc;
+  payRecords.clear();
+  if (deserializeJson(doc, json) != DeserializationError::Ok) return;
+  for (JsonObject obj : doc.as<JsonArray>()) {
+    PayRecord pr;
+    pr.id          = obj["id"]           | (uint8_t)0;
+    pr.payee       = String(obj["payee"] | "");
+    pr.rate        = obj["rate"]         | 0.0f;
+    pr.label       = String(obj["label"] | "$");
+    pr.periodStart = obj["period_start"] | (uint32_t)0;
+    pr.notes       = String(obj["notes"] | "");
+    if (pr.id && !pr.payee.isEmpty()) payRecords.push_back(pr);
+  }
+}
+
+void savePayRecords() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (const auto &pr : payRecords) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["id"]           = pr.id;
+    obj["payee"]        = pr.payee;
+    obj["rate"]         = serialized(String(pr.rate, 2));
+    obj["label"]        = pr.label;
+    obj["period_start"] = pr.periodStart;
+    obj["notes"]        = pr.notes;
+  }
+  String out; serializeJson(doc, out);
+  prefs.begin("r48disp", false);
+  prefs.putString("pay", out);
+  prefs.end();
+}
+
+void loadPayHistoryFor(uint8_t id) {
+  if (payHistory.count(id)) return;
+  char key[10]; snprintf(key, sizeof(key), "pyh_%u", id);
+  prefs.begin("r48disp", true);
+  const String json = prefs.getString(key, "[]");
+  prefs.end();
+  JsonDocument doc;
+  auto &entries = payHistory[id];
+  entries.clear();
+  if (deserializeJson(doc, json) != DeserializationError::Ok) return;
+  for (JsonObject obj : doc.as<JsonArray>()) {
+    PayHistoryEntry e;
+    e.fromTs = obj["from_ts"] | (uint32_t)0;
+    e.toTs   = obj["to_ts"]   | (uint32_t)0;
+    e.workH  = obj["work_h"]  | 0.0f;
+    e.amount = obj["amount"]  | 0.0f;
+    e.notes  = String(obj["notes"] | "");
+    // Keyed on toTs: fromTs is legitimately 0 for payees created without a
+    // period start date, and those payments must survive a reload.
+    if (e.toTs > 0) entries.push_back(e);
+  }
+}
+
+void savePayHistoryFor(uint8_t id) {
+  auto it = payHistory.find(id);
+  if (it == payHistory.end()) return;
+  char key[10]; snprintf(key, sizeof(key), "pyh_%u", id);
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (const auto &e : it->second) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["from_ts"] = e.fromTs;
+    obj["to_ts"]   = e.toTs;
+    obj["work_h"]  = serialized(String(e.workH, 1));
+    obj["amount"]  = serialized(String(e.amount, 2));
+    obj["notes"]   = e.notes;
+  }
+  String out; serializeJson(doc, out);
+  prefs.begin("r48disp", false);
+  prefs.putString(key, out);
+  prefs.end();
+}
+
+void clearPayHistoryFor(uint8_t id) {
+  payHistory.erase(id);
+  char key[10]; snprintf(key, sizeof(key), "pyh_%u", id);
+  prefs.begin("r48disp", false);
+  prefs.remove(key);
+  prefs.end();
+}
+
+static float computePayWorkH(uint32_t fromTs, uint32_t toTs) {
+  if (fromTs == 0 || fromTs >= toTs) return 0.0f;
+  time_t f = static_cast<time_t>(fromTs);
+  time_t t = static_cast<time_t>(toTs);
+  struct tm tmFrom, tmTo;
+  localtime_r(&f, &tmFrom);
+  localtime_r(&t, &tmTo);
+  const int fromYear = tmFrom.tm_year + 1900;
+  const int fromYday = tmFrom.tm_yday;
+  const int toYear   = tmTo.tm_year + 1900;
+  const int toYday   = tmTo.tm_yday;
+  float workH = 0.0f;
+  Preferences p;
+  const bool nvs = p.begin("r48disp", true);
+  for (int yr = fromYear; yr <= toYear; yr++) {
+    const int startDay = (yr == fromYear) ? fromYday : 0;
+    const int endDay   = (yr == toYear)   ? toYday   : daysInYear(yr) - 1;
+    const int days = daysInYear(yr);
+    std::vector<uint8_t> buf(static_cast<size_t>(days * 4), 0);
+    if (nvs) {
+      char key[12]; snprintf(key, sizeof(key), "hday_%d", yr);
+      const size_t stored = p.getBytesLength(key);
+      if (stored == static_cast<size_t>(days * 4)) p.getBytes(key, buf.data(), stored);
+    }
+    for (int d = startDay; d <= endDay; d++) workH += blobGet(buf, d, 2);
+    yield();
+  }
+  if (nvs) p.end();
+  return workH;
+}
+
+void apiPayGet() {
+  JsonDocument doc;
+  doc["track_pay"]    = settings.trackPay;
+  doc["hday_enabled"] = hdayEnabled();
+  JsonArray arr = doc["records"].to<JsonArray>();
+  if (settings.trackPay) {
+    const uint32_t now = static_cast<uint32_t>(time(nullptr));
+    for (const auto &pr : payRecords) {
+      JsonObject obj = arr.add<JsonObject>();
+      obj["id"]           = pr.id;
+      obj["payee"]        = pr.payee;
+      obj["rate"]         = serialized(String(pr.rate, 2));
+      obj["label"]        = pr.label;
+      obj["period_start"] = pr.periodStart;
+      obj["notes"]        = pr.notes;
+      const float workH   = computePayWorkH(pr.periodStart, now);
+      obj["work_h"]       = serialized(String(workH, 1));
+      obj["earned"]       = serialized(String(workH * pr.rate, 2));
+    }
+  }
+  sendJson(doc);
+}
+
+void apiPayPost() {
+  JsonDocument in;
+  if (deserializeJson(in, server.arg("plain")) != DeserializationError::Ok) {
+    server.send(400, "application/json", F("{\"error\":\"bad_json\"}"));
+    return;
+  }
+  const uint8_t id = in["id"] | (uint8_t)0;
+  PayRecord *existing = nullptr;
+  for (auto &pr : payRecords) if (pr.id == id) { existing = &pr; break; }
+  if (id && !existing) {
+    server.send(404, "application/json", F("{\"error\":\"not_found\"}"));
+    return;
+  }
+  PayRecord rec;
+  if (existing) rec = *existing;
+  else {
+    rec.id = nextPayId();
+    if (!rec.id) { server.send(507, "application/json", F("{\"error\":\"full\"}")); return; }
+  }
+  if (!in["payee"].isNull())        rec.payee       = String(in["payee"] | "").substring(0, 40);
+  if (!in["rate"].isNull())         rec.rate        = max(0.0f, (float)(in["rate"] | 0.0));
+  if (!in["label"].isNull())        rec.label       = String(in["label"] | "$").substring(0, 8);
+  if (!in["period_start"].isNull()) rec.periodStart = in["period_start"] | (uint32_t)0;
+  if (!in["notes"].isNull())        rec.notes       = String(in["notes"] | "").substring(0, 80);
+  rec.payee.trim();
+  if (rec.payee.isEmpty()) {
+    server.send(400, "application/json", F("{\"error\":\"payee_required\"}"));
+    return;
+  }
+  if (existing) *existing = rec;
+  else payRecords.push_back(rec);
+  savePayRecords();
+  JsonDocument out; out["ok"] = true; out["id"] = rec.id; sendJson(out);
+}
+
+void apiPayDelete() {
+  const uint8_t id = (uint8_t)server.arg("id").toInt();
+  const auto it = std::find_if(payRecords.begin(), payRecords.end(),
+                               [id](const PayRecord &pr){ return pr.id == id; });
+  if (it == payRecords.end()) {
+    server.send(404, "application/json", F("{\"error\":\"not_found\"}"));
+    return;
+  }
+  payRecords.erase(it);
+  savePayRecords();
+  clearPayHistoryFor(id);
+  JsonDocument doc; doc["ok"] = true; sendJson(doc);
+}
+
+void apiPayConfirm() {
+  JsonDocument in;
+  if (deserializeJson(in, server.arg("plain")) != DeserializationError::Ok) {
+    server.send(400, "application/json", F("{\"error\":\"bad_json\"}"));
+    return;
+  }
+  const uint8_t id = in["id"] | (uint8_t)0;
+  PayRecord *pr = nullptr;
+  for (auto &p : payRecords) if (p.id == id) { pr = &p; break; }
+  if (!pr) { server.send(404, "application/json", F("{\"error\":\"not_found\"}")); return; }
+  const uint32_t now = static_cast<uint32_t>(time(nullptr));
+  if (now < 1700000000UL) {
+    server.send(503, "application/json", F("{\"error\":\"no_time\"}"));
+    return;
+  }
+  const float workH    = computePayWorkH(pr->periodStart, now);
+  const float computed = workH * pr->rate;
+  const float amount   = !in["amount"].isNull()
+                         ? max(0.0f, (float)in["amount"]) : computed;
+  const String notes   = String(in["notes"] | "").substring(0, 80);
+  loadPayHistoryFor(id);
+  auto &hist = payHistory[id];
+  PayHistoryEntry entry;
+  entry.fromTs = pr->periodStart;
+  entry.toTs   = now;
+  entry.workH  = workH;
+  entry.amount = amount;
+  entry.notes  = notes;
+  hist.push_back(entry);
+  if (hist.size() > PAY_HISTORY_MAX)
+    hist.erase(hist.begin(), hist.begin() + (hist.size() - PAY_HISTORY_MAX));
+  savePayHistoryFor(id);
+  pr->periodStart = now;
+  savePayRecords();
+  JsonDocument doc;
+  doc["ok"]     = true;
+  doc["work_h"] = serialized(String(workH, 1));
+  doc["amount"] = serialized(String(amount, 2));
+  sendJson(doc);
+}
+
+void apiPayHistoryGet() {
+  const uint8_t id = (uint8_t)server.arg("id").toInt();
+  bool found = false;
+  for (const auto &pr : payRecords) if (pr.id == id) { found = true; break; }
+  if (!found) { server.send(404, "application/json", F("{\"error\":\"not_found\"}")); return; }
+  loadPayHistoryFor(id);
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (const auto &e : payHistory[id]) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["from_ts"] = e.fromTs;
+    obj["to_ts"]   = e.toTs;
+    obj["work_h"]  = serialized(String(e.workH, 1));
+    obj["amount"]  = serialized(String(e.amount, 2));
+    obj["notes"]   = e.notes;
+  }
+  sendJson(doc);
+}
+
+void apiPayExport() {
+  String csv = F("Payee,Period Start,Period End,Working Hours,Amount Paid,Notes\n");
+  for (const auto &pr : payRecords) {
+    loadPayHistoryFor(pr.id);
+    const auto it = payHistory.find(pr.id);
+    if (it == payHistory.end() || it->second.empty()) {
+      csv += csvEscape(pr.payee) + F(",,,,,\n");
+      continue;
+    }
+    for (const auto &e : it->second) {
+      char fromBuf[20] = "", toBuf[20] = "";
+      struct tm tm;
+      time_t tf = static_cast<time_t>(e.fromTs);
+      time_t tt = static_cast<time_t>(e.toTs);
+      if (localtime_r(&tf, &tm)) strftime(fromBuf, sizeof(fromBuf), "%Y-%m-%d", &tm);
+      if (localtime_r(&tt, &tm)) strftime(toBuf,   sizeof(toBuf),   "%Y-%m-%d", &tm);
+      csv += csvEscape(pr.payee) + ',' + fromBuf + ',' + toBuf + ',' +
+             String(e.workH, 1) + ',' + String(e.amount, 2) + ',' +
+             csvEscape(e.notes) + '\n';
+    }
+  }
+  server.send(200, "text/csv", csv);
+}
+
 static String csvEscape(const String &s) {
-  if (s.indexOf(',') < 0 && s.indexOf('"') < 0 && s.indexOf('\n') < 0) return s;
+  if (s.indexOf(',') < 0 && s.indexOf('"') < 0 && s.indexOf('\n') < 0 && s.indexOf('\r') < 0) return s;
   String out = "\"";
   for (char c : s) { if (c == '"') out += '"'; out += c; }
   out += '"';
@@ -2717,6 +3289,9 @@ void loadSettings() {
   hoursStandby = prefs.getFloat("hrsStby", 0.0f);
   hoursActive = prefs.getFloat("hrsAct", 0.0f);
   hoursWorking = prefs.getFloat("hrsWork", 0.0f);
+  settings.trackDailyActivity = prefs.getBool("trackHday", true);
+  settings.trackPay           = prefs.getBool("trackPay",  false);
+  lastKnownTs = prefs.getUInt("lastTs", 0);
   prefs.end();
 
   settings.hostname = sanitizeHostname(settings.hostname);
@@ -2806,6 +3381,8 @@ void saveSettings() {
   prefs.putString("wxZip", settings.zipCode);
   prefs.putFloat("wxLat", settings.weatherLat);
   prefs.putFloat("wxLon", settings.weatherLon);
+  prefs.putBool("trackHday", settings.trackDailyActivity);
+  prefs.putBool("trackPay",  settings.trackPay);
   prefs.end();
 }
 
@@ -2823,6 +3400,13 @@ void saveHours() {
   prefs.putFloat("hrsStby", hoursStandby);
   prefs.putFloat("hrsAct", hoursActive);
   prefs.putFloat("hrsWork", hoursWorking);
+  // Persist current Unix time so boot-without-NTP can seed the RTC from NVS
+  time_t nowTs;
+  time(&nowTs);
+  if (nowTs > 1700000000UL) {
+    lastKnownTs = static_cast<uint32_t>(nowTs);
+    prefs.putUInt("lastTs", lastKnownTs);
+  }
   prefs.end();
   lastHoursSaveMs = millis();
 }
@@ -3954,6 +4538,8 @@ void apiSettingsGet() {
   doc["anim_enabled"] = settings.animEnabled;
   doc["anim_type"]    = settings.animType <= 15 ? (int)settings.animType : (int)activeTheme().animType;
   doc["zip_code"]     = settings.zipCode;
+  doc["track_daily_activity"] = settings.trackDailyActivity;
+  doc["track_pay"]            = settings.trackPay;
   doc["ota_password_set"] = settings.otaPassword.length() >= 8;
   doc["wifi_ssid"] = settings.wifiSsid;
   doc["wifi_password_set"] = !settings.wifiPassword.isEmpty();
@@ -4037,15 +4623,17 @@ void apiSettingsPost() {
       }
     }
   }
-  if (server.hasArg("wifi_ssid")) settings.wifiSsid = server.arg("wifi_ssid");
-  if (server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0) settings.wifiPassword = server.arg("wifi_password");
-  if (server.hasArg("bms_name")) settings.bmsName = server.arg("bms_name");
-  if (server.hasArg("bms_protocol")) settings.bmsProtocol = server.arg("bms_protocol");
-  if (server.hasArg("mower_model")) settings.mowerModel = server.arg("mower_model");
-  if (server.hasArg("subtitle")) settings.subtitle = server.arg("subtitle");
-  if (server.hasArg("usage_category")) settings.usageCategory = server.arg("usage_category");
-  else if (server.hasArg("vehicle_type")) settings.usageCategory = server.arg("vehicle_type");
-  if (server.hasArg("theme_id")) settings.themeId = server.arg("theme_id");
+  if (server.hasArg("track_daily_activity")) settings.trackDailyActivity = server.arg("track_daily_activity") == "1" || server.arg("track_daily_activity") == "on" || server.arg("track_daily_activity") == "true";
+  if (server.hasArg("track_pay"))            settings.trackPay           = server.arg("track_pay")            == "1" || server.arg("track_pay")            == "on" || server.arg("track_pay")            == "true";
+  if (server.hasArg("wifi_ssid")) settings.wifiSsid = server.arg("wifi_ssid").substring(0, 32);
+  if (server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0) settings.wifiPassword = server.arg("wifi_password").substring(0, 64);
+  if (server.hasArg("bms_name")) settings.bmsName = server.arg("bms_name").substring(0, 32);
+  if (server.hasArg("bms_protocol")) settings.bmsProtocol = server.arg("bms_protocol").substring(0, 32);
+  if (server.hasArg("mower_model")) settings.mowerModel = server.arg("mower_model").substring(0, 64);
+  if (server.hasArg("subtitle")) settings.subtitle = server.arg("subtitle").substring(0, 64);
+  if (server.hasArg("usage_category")) settings.usageCategory = server.arg("usage_category").substring(0, 32);
+  else if (server.hasArg("vehicle_type")) settings.usageCategory = server.arg("vehicle_type").substring(0, 32);
+  if (server.hasArg("theme_id")) settings.themeId = server.arg("theme_id").substring(0, 32);
   if (server.hasArg("discharge_current_negative")) settings.dischargeCurrentNegative = server.arg("discharge_current_negative") == "1";
   if (server.hasArg("display_enabled")) settings.displayEnabled = server.arg("display_enabled") == "1";
   if (server.hasArg("activity_detection")) settings.activityDetection = server.arg("activity_detection") == "1";
@@ -4054,7 +4642,7 @@ void apiSettingsPost() {
   if (server.hasArg("mower_run_amps")) settings.mowerRunAmps = constrain(server.arg("mower_run_amps").toFloat(), 1.0f, 300.0f);
   if (server.hasArg("mowing_detect_amps")) settings.bladesOnAmps = constrain(server.arg("mowing_detect_amps").toFloat(), settings.mowerRunAmps, 400.0f);
   if (server.hasArg("nominal_pack_ah")) settings.nominalPackAh = constrain(server.arg("nominal_pack_ah").toFloat(), 1.0f, 400.0f);
-  if (server.hasArg("timezone")) settings.timezone = server.arg("timezone");
+  if (server.hasArg("timezone")) settings.timezone = server.arg("timezone").substring(0, 64);
   if (server.hasArg("brightness")) settings.brightness = constrain(static_cast<uint8_t>(server.arg("brightness").toInt()), static_cast<uint8_t>(20), static_cast<uint8_t>(255));
   if (server.hasArg("display_rotation")) settings.displayRotation = normalizeDisplayRotation(server.arg("display_rotation").toInt());
   if (server.hasArg("lcd_timeout_sec")) settings.lcdTimeoutSec = constrain(static_cast<uint16_t>(server.arg("lcd_timeout_sec").toInt()), static_cast<uint16_t>(0), static_cast<uint16_t>(3600));
@@ -4066,20 +4654,20 @@ void apiSettingsPost() {
   if (server.hasArg("low_voltage_floor_v")) settings.lowVoltageFloorV = constrain(server.arg("low_voltage_floor_v").toFloat(), 2.0f, 3.8f);
   if (server.hasArg("board_battery_low_pct")) settings.boardBatteryLowPct = (uint8_t)constrain(server.arg("board_battery_low_pct").toInt(), 5, 80);
   if (server.hasArg("mqtt_enabled")) settings.mqttEnabled = server.arg("mqtt_enabled") == "1" || server.arg("mqtt_enabled") == "on" || server.arg("mqtt_enabled") == "true";
-  if (server.hasArg("mqtt_host")) settings.mqttHost = server.arg("mqtt_host");
+  if (server.hasArg("mqtt_host")) settings.mqttHost = server.arg("mqtt_host").substring(0, 128);
   if (server.hasArg("mqtt_port")) settings.mqttPort = static_cast<uint16_t>(constrain(server.arg("mqtt_port").toInt(), 1, 65535));
-  if (server.hasArg("mqtt_user")) settings.mqttUser = server.arg("mqtt_user");
-  if (server.hasArg("mqtt_password") && server.arg("mqtt_password").length() > 0) settings.mqttPassword = server.arg("mqtt_password");
-  if (server.hasArg("mqtt_topic_prefix")) settings.mqttTopicPrefix = server.arg("mqtt_topic_prefix");
+  if (server.hasArg("mqtt_user")) settings.mqttUser = server.arg("mqtt_user").substring(0, 64);
+  if (server.hasArg("mqtt_password") && server.arg("mqtt_password").length() > 0) settings.mqttPassword = server.arg("mqtt_password").substring(0, 128);
+  if (server.hasArg("mqtt_topic_prefix")) settings.mqttTopicPrefix = server.arg("mqtt_topic_prefix").substring(0, 64);
   if (server.hasArg("feature_mic")) settings.featureMic = server.arg("feature_mic") == "1";
   if (server.hasArg("mic_run_threshold")) settings.micRunThreshold = constrain(server.arg("mic_run_threshold").toFloat(), 100.0f, 12000.0f);
   if (server.hasArg("charge_min_amps")) settings.chargeMinAmps = constrain(server.arg("charge_min_amps").toFloat(), 0.1f, 200.0f);
-  if (server.hasArg("label_charging") && server.arg("label_charging").length() > 0) settings.labelCharging = server.arg("label_charging");
-  if (server.hasArg("label_standby") && server.arg("label_standby").length() > 0) settings.labelStandby = server.arg("label_standby");
-  if (server.hasArg("label_active") && server.arg("label_active").length() > 0) settings.labelActive = server.arg("label_active");
-  if (server.hasArg("label_working") && server.arg("label_working").length() > 0) settings.labelWorking = server.arg("label_working");
+  if (server.hasArg("label_charging") && server.arg("label_charging").length() > 0) settings.labelCharging = server.arg("label_charging").substring(0, 24);
+  if (server.hasArg("label_standby") && server.arg("label_standby").length() > 0) settings.labelStandby = server.arg("label_standby").substring(0, 24);
+  if (server.hasArg("label_active") && server.arg("label_active").length() > 0) settings.labelActive = server.arg("label_active").substring(0, 24);
+  if (server.hasArg("label_working") && server.arg("label_working").length() > 0) settings.labelWorking = server.arg("label_working").substring(0, 24);
   if (server.hasArg("ntp_enabled")) settings.ntpEnabled = server.arg("ntp_enabled") == "1";
-  if (server.hasArg("ntp_server")) settings.ntpServer = server.arg("ntp_server");
+  if (server.hasArg("ntp_server")) settings.ntpServer = server.arg("ntp_server").substring(0, 128);
   if (server.hasArg("time_format")) settings.timeFormat = server.arg("time_format") == "24h" ? "24h" : "12h";
   if (server.hasArg("temp_unit")) { const String u = server.arg("temp_unit"); settings.tempUnit = (u == "C") ? "C" : "F"; }
   // Changing baseline adjusts the displayed total without touching counted hours.
@@ -4298,6 +4886,17 @@ void apiBatteryOff() {
   triggerBatteryOff();
 }
 
+// CSRF guard: browsers attach an Origin header to cross-site requests. Reject
+// state-changing requests whose Origin host doesn't match the Host header.
+// Requests without an Origin (curl, scripts, HA integrations) pass through.
+static bool sameOriginOk() {
+  const String &origin = server.header("Origin");
+  if (origin.isEmpty()) return true;
+  const int sep = origin.indexOf("://");
+  const String originHost = sep >= 0 ? origin.substring(sep + 3) : origin;
+  return originHost.equalsIgnoreCase(server.hostHeader());
+}
+
 void handleUpdateGet() {
   String html = commonHead("Firmware Update");
   html += R48Web::updateBody();
@@ -4308,7 +4907,14 @@ void handleUpdateGet() {
   sendContentPieces(html);
 }
 
+static bool updateOriginBlocked = false;
+
 void handleUpdatePostDone() {
+  if (updateOriginBlocked) {
+    server.sendHeader("Connection", "close");
+    server.send(403, "text/plain", "Cross-origin update blocked.");
+    return;
+  }
   const bool ok = !Update.hasError();
   server.sendHeader("Connection", "close");
   server.send(ok ? 200 : 500, "text/plain", ok ? "Update complete. Rebooting." : "Update failed.");
@@ -4319,7 +4925,11 @@ void handleUpdatePostDone() {
 void handleUpdateUpload() {
   HTTPUpload &upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
+    updateOriginBlocked = !sameOriginOk();
+    if (updateOriginBlocked) return;
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+  } else if (updateOriginBlocked) {
+    return;
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
   } else if (upload.status == UPLOAD_FILE_END) {
@@ -4327,7 +4937,19 @@ void handleUpdateUpload() {
   }
 }
 
+static WebServer::THandlerFunction guarded(void (*handler)()) {
+  return [handler]() {
+    if (!sameOriginOk()) {
+      server.send(403, "application/json", F("{\"error\":\"cross_origin\"}"));
+      return;
+    }
+    handler();
+  };
+}
+
 void setupRoutes() {
+  static const char *collectedHeaders[] = {"Origin"};
+  server.collectHeaders(collectedHeaders, 1);
   server.on("/", HTTP_GET, []() { sendPage("Dashboard", R48Web::dashboardBody); });
   server.on("/battery", HTTP_GET, []() { sendPage("Battery", R48Web::batteryBody); });
   server.on("/maintenance", HTTP_GET, []() { sendPage("Maintenance", R48Web::maintenanceBody); });
@@ -4339,32 +4961,40 @@ void setupRoutes() {
   server.on("/app.js", HTTP_GET, []() { server.send(200, "application/javascript", R48Web::appScript()); });
   server.on("/api/status", HTTP_GET, apiStatus);
   server.on("/api/settings", HTTP_GET, apiSettingsGet);
-  server.on("/api/settings", HTTP_POST, apiSettingsPost);
+  server.on("/api/settings", HTTP_POST, guarded(apiSettingsPost));
   server.on("/api/bms/profiles", HTTP_GET, apiBmsProfiles);
   server.on("/api/themes", HTTP_GET, apiThemes);
   server.on("/api/usage-categories", HTTP_GET, apiUsageCategories);
   server.on("/api/wifi/scan", HTTP_GET, apiWifiScan);
-  server.on("/api/wifi/forget", HTTP_POST, apiWifiForget);
-  server.on("/api/provisioning/start", HTTP_POST, apiProvisioningStart);
+  server.on("/api/wifi/forget", HTTP_POST, guarded(apiWifiForget));
+  server.on("/api/provisioning/start", HTTP_POST, guarded(apiProvisioningStart));
   server.on("/api/ble/scan", HTTP_GET, apiBleScan);
-  server.on("/api/bms/reconnect", HTTP_POST, apiBmsReconnect);
-  server.on("/api/bms/read-now", HTTP_POST, apiBmsReadNow);
-  server.on("/api/display/next", HTTP_POST, apiDisplayNext);
-  server.on("/api/display/page", HTTP_POST, apiDisplayPage);
-  server.on("/api/reboot", HTTP_POST, apiReboot);
-  server.on("/api/battery/off", HTTP_POST, apiBatteryOff);
+  server.on("/api/bms/reconnect", HTTP_POST, guarded(apiBmsReconnect));
+  server.on("/api/bms/read-now", HTTP_POST, guarded(apiBmsReadNow));
+  server.on("/api/display/next", HTTP_POST, guarded(apiDisplayNext));
+  server.on("/api/display/page", HTTP_POST, guarded(apiDisplayPage));
+  server.on("/api/reboot", HTTP_POST, guarded(apiReboot));
+  server.on("/api/battery/off", HTTP_POST, guarded(apiBatteryOff));
   server.on("/api/machine-info", HTTP_GET, apiMachineInfoGet);
-  server.on("/api/machine-info", HTTP_POST, apiMachineInfoPost);
+  server.on("/api/machine-info", HTTP_POST, guarded(apiMachineInfoPost));
   server.on("/api/maintenance", HTTP_GET, apiMaintenanceGet);
-  server.on("/api/maintenance", HTTP_POST, apiMaintenancePost);
-  server.on("/api/maintenance/confirm", HTTP_POST, apiMaintenanceConfirm);
-  server.on("/api/maintenance/delete", HTTP_POST, apiMaintenanceDelete);
+  server.on("/api/maintenance", HTTP_POST, guarded(apiMaintenancePost));
+  server.on("/api/maintenance/confirm", HTTP_POST, guarded(apiMaintenanceConfirm));
+  server.on("/api/maintenance/delete", HTTP_POST, guarded(apiMaintenanceDelete));
   server.on("/api/maintenance/history", HTTP_GET, apiMaintenanceHistoryGet);
-  server.on("/api/maintenance/history/delete", HTTP_POST, apiMaintenanceHistoryDelete);
-  server.on("/api/maintenance/history/update", HTTP_POST, apiMaintenanceHistoryUpdate);
+  server.on("/api/maintenance/history/delete", HTTP_POST, guarded(apiMaintenanceHistoryDelete));
+  server.on("/api/maintenance/history/update", HTTP_POST, guarded(apiMaintenanceHistoryUpdate));
   server.on("/api/maintenance/export", HTTP_GET, apiMaintenanceExport);
-  server.on("/api/mqtt/publish-now", HTTP_POST, apiMqttPublishNow);
-  server.on("/api/mqtt/rediscover", HTTP_POST, apiMqttRediscover);
+  server.on("/api/heatmap", HTTP_GET, apiHeatmapGet);
+  server.on("/api/heatmap/export.csv", HTTP_GET, apiHeatmapExport);
+  server.on("/api/pay", HTTP_GET,    apiPayGet);
+  server.on("/api/pay", HTTP_POST,   guarded(apiPayPost));
+  server.on("/api/pay", HTTP_DELETE, guarded(apiPayDelete));
+  server.on("/api/pay/confirm", HTTP_POST,   guarded(apiPayConfirm));
+  server.on("/api/pay/history", HTTP_GET,    apiPayHistoryGet);
+  server.on("/api/pay/export.csv", HTTP_GET, apiPayExport);
+  server.on("/api/mqtt/publish-now", HTTP_POST, guarded(apiMqttPublishNow));
+  server.on("/api/mqtt/rediscover", HTTP_POST, guarded(apiMqttRediscover));
   server.on("/api/mqtt/test", HTTP_GET, apiMqttTest);
   server.on("/api/weather", HTTP_GET, apiWeatherGet);
   server.onNotFound([]() {
@@ -4427,9 +5057,17 @@ void setup() {
   setupMqtt();
   loadDegradation();
   loadMaintenance();
+  loadPayRecords();
   loadMachineInfo();
   initDefaultMaintenanceItems();
   loadBmsCache();
+  // Seed the RTC with the last saved timestamp so day-rollover works on WiFi-less boots.
+  // NTP will override this automatically when it syncs.
+  if (lastKnownTs > 1700000000UL) {
+    struct timeval tv = { static_cast<time_t>(lastKnownTs), 0 };
+    settimeofday(&tv, nullptr);
+  }
+  initHdaySnapshot();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.setClock(400000);
   initDisplay();
@@ -4463,6 +5101,7 @@ void loop() {
   }
   R48Mic::loop(activityDetected());
   updateHours();
+  checkHdayRollover();
   maybeProbeTouch();
   maybeHandleTouch();
   pollButtons();
