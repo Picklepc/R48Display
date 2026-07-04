@@ -3,12 +3,18 @@ name: Deploy Web Installer
 # Publishes the ESP Web Tools installer to GitHub Pages, always serving the
 # latest published GitHub Release. The firmware image is downloaded from the
 # release assets in CI and bundled into the site so the browser fetches it
-# same-origin (no CORS). Runs automatically whenever a release is published,
-# or when the installer page itself changes.
+# same-origin (no CORS).
+#
+# Runs after the "Build Firmware" workflow finishes a tag build (that workflow
+# creates the release). A release: published trigger would NOT fire here because
+# the release is created with the default GITHUB_TOKEN, and token-created events
+# can't trigger other workflows — so we key off workflow_run instead. Also runs
+# on installer-page edits and manual dispatch.
 
 on:
-  release:
-    types: [ published ]
+  workflow_run:
+    workflows: [ "Build Firmware" ]
+    types: [ completed ]
   push:
     branches: [ main ]
     paths:
@@ -28,6 +34,12 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # For workflow_run, only deploy after a successful tag build (head_branch is
+    # the tag, e.g. "v0.3.6"). push/dispatch always proceed.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
