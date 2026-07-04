@@ -5151,7 +5151,19 @@ static void fwUpdDoCheck() {
     gFwUpd.busy = true; gFwUpd.phase = "checking"; xSemaphoreGive(fwUpdMux);
   }
   std::vector<String> tags;
-  const bool ok = fwUpdFetchReleases(tags);
+  bool ok = fwUpdFetchReleases(tags);
+  if (!ok) {
+    // Retry with BLE torn down to free internal heap for the TLS handshake —
+    // the likely cause of a failed check on a memory-tight device (same reason
+    // the install path frees BLE). Restore BLE afterward.
+    fwUpdateActive = true;
+    delay(50);
+    NimBLEDevice::deinit(true);
+    bms.initialized = false;
+    ok = fwUpdFetchReleases(tags);
+    bleBms.begin();
+    fwUpdateActive = false;
+  }
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = false;
     gFwUpd.checked = true;

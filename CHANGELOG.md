@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.4.1](docs/releases/v0.4.1.md) | Update check falls back to freeing Bluetooth for the TLS handshake, fixing "could not reach GitHub" on memory-tight devices. |
 | [v0.4.0](docs/releases/v0.4.0.md) | OTA auto-rollback on bad boot; wrong-file upload guard; version picker to install/roll back to any release. |
 | [v0.3.7](docs/releases/v0.3.7.md) | Precise pay timekeeping (per-session log); split/back-date correction tool; live current-day hours. |
 | [v0.3.6](docs/releases/v0.3.6.md) | One-click web USB installer; device self-updates over Wi-Fi from GitHub releases. |
