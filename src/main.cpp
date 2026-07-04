@@ -18,6 +18,7 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
+#include <esp_ota_ops.h>
 #include <nvs_flash.h>
 
 #include <Arduino_GFX_Library.h>
@@ -5070,6 +5071,8 @@ static const char *kUpdateRepo = "Picklepc/R48Display";
 struct FirmwareUpdateState {
   String   latestVersion;        // "0.3.6" (v-stripped); empty until first check
   String   latestTag;            // raw tag as GitHub has it, e.g. "v0.3.6"
+  String   targetTag;            // tag chosen to install; empty → latest
+  std::vector<String> tags;      // recent release tags, newest first (for the picker)
   bool     available   = false;  // latest > running
   bool     busy        = false;  // a check or download is in flight
   String   phase       = "idle"; // idle | checking | downloading | error
@@ -5115,7 +5118,7 @@ static bool versionIsNewer(const String &candidate, const String &base) {
   return cc > bc;
 }
 
-static bool fwUpdFetchLatestTag(String &tag) {
+static bool fwUpdFetchReleases(std::vector<String> &tags) {
   if (WiFi.status() != WL_CONNECTED) return false;
   WiFiClientSecure client;
   client.setInsecure();  // integrity comes from the OTA image validation, not the cert
@@ -5125,33 +5128,38 @@ static bool fwUpdFetchLatestTag(String &tag) {
   http.useHTTP10(true);  // avoid chunked transfer-encoding so the stream parses cleanly
   http.addHeader("User-Agent", "R48Display");           // GitHub API rejects UA-less requests
   http.addHeader("Accept", "application/vnd.github+json");
-  const String url = "https://api.github.com/repos/" + String(kUpdateRepo) + "/releases/latest";
+  const String url = "https://api.github.com/repos/" + String(kUpdateRepo) + "/releases?per_page=15";
   if (!http.begin(client, url)) return false;
   const int code = http.GET();
   if (code != 200) { http.end(); return false; }
-  JsonDocument filter; filter["tag_name"] = true;       // stream-parse only the tag
+  JsonDocument filter; filter[0]["tag_name"] = true;    // stream-parse only each tag
   JsonDocument doc;
   const DeserializationError err =
       deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
   http.end();
   if (err) return false;
-  tag = String(doc["tag_name"] | "");
-  return tag.length() > 0;
+  tags.clear();
+  for (JsonObject o : doc.as<JsonArray>()) {
+    const String t = String(o["tag_name"] | "");
+    if (t.length()) tags.push_back(t);
+  }
+  return !tags.empty();  // GitHub returns releases newest-first
 }
 
 static void fwUpdDoCheck() {
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = true; gFwUpd.phase = "checking"; xSemaphoreGive(fwUpdMux);
   }
-  String tag;
-  const bool ok = fwUpdFetchLatestTag(tag);
+  std::vector<String> tags;
+  const bool ok = fwUpdFetchReleases(tags);
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = false;
     gFwUpd.checked = true;
     if (ok) {
-      String ver = tag;
+      gFwUpd.tags = tags;
+      String ver = tags[0];
       if (ver.length() && (ver[0] == 'v' || ver[0] == 'V')) ver = ver.substring(1);
-      gFwUpd.latestTag = tag;
+      gFwUpd.latestTag = tags[0];
       gFwUpd.latestVersion = ver;
       gFwUpd.available = versionIsNewer(ver, FIRMWARE_VERSION);
       gFwUpd.phase = "idle";
@@ -5167,7 +5175,7 @@ static void fwUpdDoCheck() {
 static void fwUpdDoApply() {
   String tag;
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
-    tag = gFwUpd.latestTag;
+    tag = gFwUpd.targetTag.length() ? gFwUpd.targetTag : gFwUpd.latestTag;
     gFwUpd.busy = true;
     gFwUpd.phase = "downloading";
     gFwUpd.progress = 0;
@@ -5247,6 +5255,8 @@ void apiUpdateStatus() {
     doc["phase"]     = gFwUpd.phase;
     doc["progress"]  = gFwUpd.progress;
     doc["error"]     = gFwUpd.error;
+    JsonArray ta = doc["tags"].to<JsonArray>();
+    for (const auto &t : gFwUpd.tags) ta.add(t);
     xSemaphoreGive(fwUpdMux);
   }
   sendJson(doc);
@@ -5262,9 +5272,21 @@ void apiUpdateCheck() {
 void apiUpdateApply() {
   if (!fwUpdTaskHandle) { server.send(503, "application/json", F("{\"error\":\"not_ready\"}")); return; }
   if (WiFi.status() != WL_CONNECTED) { server.send(503, "application/json", F("{\"error\":\"offline\"}")); return; }
+  // Optional {version:"0.3.5"} to install a specific release (allows downgrade /
+  // reinstall for recovery). Sanitize to a vX.Y.Z tag to keep the URL safe.
+  JsonDocument in;
+  deserializeJson(in, server.arg("plain"));
+  String tag;
+  for (char c : String(in["version"] | "")) if ((c >= '0' && c <= '9') || c == '.') tag += c;
   bool ok = false;
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, pdMS_TO_TICKS(200)) == pdTRUE) {
-    ok = gFwUpd.available && !gFwUpd.busy;
+    if (tag.length()) {
+      gFwUpd.targetTag = "v" + tag;         // explicit choice: allow any release
+      ok = !gFwUpd.busy;
+    } else {
+      gFwUpd.targetTag = gFwUpd.latestTag;  // default: latest, only if newer
+      ok = gFwUpd.available && !gFwUpd.busy;
+    }
     xSemaphoreGive(fwUpdMux);
   }
   if (!ok) { server.send(409, "application/json", F("{\"error\":\"no_update\"}")); return; }
@@ -5293,12 +5315,21 @@ void handleUpdateGet() {
   sendContentPieces(html);
 }
 
-static bool updateOriginBlocked = false;
+static bool     updateOriginBlocked = false;
+static bool     updateBadImage      = false;
+static uint8_t  updateHeader[0x24];   // need through the app-descriptor magic at 0x20
+static size_t   updateHeaderLen      = 0;
 
 void handleUpdatePostDone() {
   if (updateOriginBlocked) {
     server.sendHeader("Connection", "close");
     server.send(403, "text/plain", "Cross-origin update blocked.");
+    return;
+  }
+  if (updateBadImage) {
+    server.sendHeader("Connection", "close");
+    server.send(400, "text/plain",
+      "That file isn't an app image. Upload firmware.bin (the app image), not firmware-merged.bin.");
     return;
   }
   const bool ok = !Update.hasError();
@@ -5312,11 +5343,30 @@ void handleUpdateUpload() {
   HTTPUpload &upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
     updateOriginBlocked = !sameOriginOk();
+    updateBadImage = false;
+    updateHeaderLen = 0;
     if (updateOriginBlocked) return;
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
-  } else if (updateOriginBlocked) {
+  } else if (updateOriginBlocked || updateBadImage) {
     return;
   } else if (upload.status == UPLOAD_FILE_WRITE) {
+    // Reject anything that isn't an ESP32 app image before committing. App
+    // images carry the app-descriptor magic 0xABCD5432 at offset 0x20; a
+    // merged/bootloader bin (a common wrong-file mistake) does not.
+    if (updateHeaderLen < sizeof(updateHeader)) {
+      const size_t take = min(sizeof(updateHeader) - updateHeaderLen, (size_t)upload.currentSize);
+      memcpy(updateHeader + updateHeaderLen, upload.buf, take);
+      updateHeaderLen += take;
+      if (updateHeaderLen >= sizeof(updateHeader)) {
+        const uint32_t descMagic = updateHeader[0x20] | (updateHeader[0x21] << 8) |
+                                   (updateHeader[0x22] << 16) | ((uint32_t)updateHeader[0x23] << 24);
+        if (updateHeader[0] != 0xE9 || descMagic != 0xABCD5432) {
+          updateBadImage = true;
+          Update.abort();
+          return;
+        }
+      }
+    }
     if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
   } else if (upload.status == UPLOAD_FILE_END) {
     if (!Update.end(true)) Update.printError(Serial);
@@ -5395,6 +5445,12 @@ void setupRoutes() {
 }
 
 }  // namespace
+
+// OTA rollback: tell the Arduino core NOT to auto-confirm a freshly-flashed app
+// at boot. Instead we confirm it ourselves at the end of setup() once the app
+// has clearly come up healthy. If a bad image can't reach that point (crash or
+// hang during boot), the bootloader reverts to the previous working firmware.
+extern "C" bool verifyRollbackLater() { return true; }
 
 void setup() {
   const bool setupButtonHeld = bootHeldForSetup();
@@ -5478,6 +5534,9 @@ void setup() {
   drawDisplay(true);
   Serial.printf("WiFi mode: %s\n", provisioningActive ? "setup AP" : "STA");
   Serial.printf("Touch %s\n", touchReady ? "ready" : "missing");
+  // Boot reached a healthy state — confirm this OTA image so the bootloader
+  // won't roll it back. (No-op when not booting a pending OTA image.)
+  esp_ota_mark_app_valid_cancel_rollback();
 }
 
 void loop() {

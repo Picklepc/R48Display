@@ -384,17 +384,23 @@ String settingsBody() {
       "<div id='fwupd-progress-wrap' style='display:none;background:var(--line);border-radius:4px;height:8px;margin-top:8px'>"
       "<div id='fwupd-progress' style='background:var(--primary);border-radius:4px;height:8px;width:0%;transition:width .3s'></div>"
       "</div>"
+      "<div id='fwupd-pick' style='display:none;margin-top:12px'>"
+      "<label>Install a specific version<span class='hint'>Any published release &mdash; use this to reinstall or roll back to an earlier version.</span>"
+      "<div style='display:flex;gap:8px;margin-top:4px'>"
+      "<select id='fwupd-version' style='flex:1'></select>"
+      "<button type='button' onclick='installSelectedVersion()'>Install</button>"
+      "</div></label></div>"
       "<label class='check' style='margin-top:12px'><input name='auto_update_check' type='checkbox' id='autoUpdCb'> Automatically check for updates</label>"
       "</div>"
       "<details style='margin-top:14px'>"
       "<summary style='cursor:pointer;color:var(--muted);font-size:14px'>Manual upload (advanced)</summary>"
       "<form method='POST' action='/update' enctype='multipart/form-data' style='margin-top:10px'>"
       "<div class='form-grid' style='margin-bottom:10px'>"
-      "<label>Firmware .bin<input type='file' name='firmware' accept='.bin'></label>"
+      "<label>Firmware image<span class='hint'>Upload <b>firmware.bin</b> (the app image) from a release &mdash; NOT firmware-merged.bin, which is for USB flashing only.</span><input type='file' name='firmware' accept='.bin'></label>"
       "</div>"
       "<button class='primary'>Upload &amp; Reboot</button>"
       "</form>"
-      "<p class='hint' style='margin-top:10px'>Flash a specific compiled .bin. The device reboots automatically after a successful flash.</p>"
+      "<p class='hint' style='margin-top:10px'>The device reboots automatically after a successful flash. If it rejects the file, you likely picked firmware-merged.bin &mdash; use the version picker above instead.</p>"
       "</details>"
       "</div>"
 
@@ -1170,6 +1176,15 @@ function renderUpdateStatus(s) {
     install.style.display = (s.available && !busy) ? '' : 'none';
     if (s.available) install.textContent = `Install v${s.latest}`;
   }
+  const pick = $('fwupd-pick'), sel = $('fwupd-version');
+  if (pick && sel && Array.isArray(s.tags) && s.tags.length) {
+    pick.style.display = '';
+    if (sel.dataset.filled !== String(s.tags.length)) {
+      sel.innerHTML = s.tags.map(t => { const v = String(t).replace(/^v/,'');
+        return `<option value="${escAttr(v)}">${escAttr(t)}${v===s.current?' (installed)':''}</option>`; }).join('');
+      sel.dataset.filled = String(s.tags.length);
+    }
+  }
   if (status) {
     if (s.phase === 'checking') status.textContent = 'Checking GitHub…';
     else if (s.phase === 'downloading') status.textContent = `Installing… ${s.progress || 0}% — do not power off. The device reboots when done.`;
@@ -1207,6 +1222,20 @@ async function applyFirmwareUpdate() {
   const install = $('fwupd-install'); if (install) install.style.display = 'none';
   const res = await fetch('/api/update/apply', {method:'POST'}).catch(() => null);
   if (!res || !res.ok) { if (status) status.textContent = 'Could not start update.'; loadUpdateStatus(); return; }
+  startUpdatePolling();
+  watchForReboot();
+}
+
+async function installSelectedVersion() {
+  const sel = $('fwupd-version');
+  const v = sel && sel.value;
+  if (!v) return;
+  if (!confirm(`Install v${v} now? The device will reboot and be offline for 1–2 minutes.`)) return;
+  const status = $('fwupd-status'); if (status) status.textContent = `Starting install of v${v}…`;
+  const res = await fetch('/api/update/apply', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({version:v})
+  }).catch(()=>null);
+  if (!res || !res.ok) { if (status) status.textContent = 'Could not start install.'; loadUpdateStatus(); return; }
   startUpdatePolling();
   watchForReboot();
 }
