@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>R48Display Installer</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      --bg: #0f1216; --panel: #171b21; --panel2: #1e242c;
+      --line: #2a323c; --text: #e6edf3; --muted: #9aa7b4;
+      --primary: #3ba55d; --bad: #e5534b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      display: flex; justify-content: center; padding: 32px 16px;
+    }
+    main { width: 100%; max-width: 560px; }
+    h1 { font-size: 26px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 24px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 14px; padding: 22px; margin-bottom: 18px;
+    }
+    ol { margin: 0; padding-left: 22px; }
+    ol li { margin-bottom: 8px; }
+    .cta { text-align: center; padding: 26px 22px; }
+    esp-web-install-button { --esp-tools-button-color: #fff; }
+    esp-web-install-button[install-unsupported] { display: none; }
+    .unsupported {
+      display: none; color: var(--bad); font-size: 14px; margin-top: 12px;
+    }
+    esp-web-install-button[install-unsupported] ~ .unsupported { display: block; }
+    .ver { color: var(--muted); font-size: 13px; margin-top: 14px; }
+    .note { color: var(--muted); font-size: 13.5px; }
+    a { color: var(--primary); }
+    button.link {
+      background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+      border-radius: 9px; padding: 11px 18px; font: inherit; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>R48Display Installer</h1>
+    <p class="sub">Flash your Waveshare ESP32-S3 display straight from this page — no software to install.</p>
+
+    <div class="card">
+      <ol>
+        <li>Plug the display into this computer with a <b>USB-C data cable</b> (not a charge-only cable).</li>
+        <li>Click <b>Install R48Display</b> below.</li>
+        <li>Pick the device's serial port in the pop-up and let it flash. It reboots when done.</li>
+      </ol>
+    </div>
+
+    <div class="card cta">
+      <esp-web-install-button manifest="./manifest.json">
+        <button slot="activate" class="link" style="background:var(--primary);border-color:var(--primary);font-weight:600;font-size:16px;padding:13px 26px">Install R48Display</button>
+      </esp-web-install-button>
+      <p class="unsupported">Your browser can't flash over USB. Open this page in <b>Google Chrome</b> or <b>Microsoft Edge</b> on a desktop computer.</p>
+      <p class="ver" id="ver">&nbsp;</p>
+    </div>
+
+    <div class="card">
+      <p class="note" style="margin-top:0"><b>Already set up?</b> Once the device is on your Wi-Fi, you don't need this page again — it checks for and installs its own updates from its web dashboard.</p>
+      <p class="note" style="margin-bottom:0">Re-flashing here keeps your saved settings (Wi-Fi, BMS, hours). Your data lives in a separate storage area the installer doesn't touch.</p>
+    </div>
+
+    <p class="note" style="text-align:center">
+      <a href="https://github.com/Picklepc/R48Display">Project on GitHub</a> ·
+      <a href="https://github.com/Picklepc/R48Display/releases">Release notes</a>
+    </p>
+  </main>
+
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <script>
+    fetch('./manifest.json', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(m => { document.getElementById('ver').textContent = 'Firmware version ' + m.version; })
+      .catch(() => {});
+  </script>
+</body>
+</html>

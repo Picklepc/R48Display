@@ -1,5 +1,6 @@
 .pio/
 .vscode/
+.claude/
 *.code-workspace
 *.log
 __pycache__/

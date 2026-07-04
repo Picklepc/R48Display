@@ -1,0 +1,70 @@
+name: Deploy Web Installer
+
+# Publishes the ESP Web Tools installer to GitHub Pages, always serving the
+# latest published GitHub Release. The firmware image is downloaded from the
+# release assets in CI and bundled into the site so the browser fetches it
+# same-origin (no CORS). Runs automatically whenever a release is published,
+# or when the installer page itself changes.
+
+on:
+  release:
+    types: [ published ]
+  push:
+    branches: [ main ]
+    paths:
+      - 'installer/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble installer from latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          VER=${TAG#v}
+          echo "Latest release: $TAG (version $VER)"
+          mkdir -p _site
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'firmware-merged.bin' --output _site/firmware.bin
+          cp installer/index.html _site/index.html
+          cat > _site/manifest.json <<EOF
+          {
+            "name": "R48Display",
+            "version": "${VER}",
+            "new_install_prompt_erase": false,
+            "builds": [
+              {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                  { "path": "firmware.bin", "offset": 0 }
+                ]
+              }
+            ]
+          }
+          EOF
+          echo "Assembled installer for $TAG ($(du -h _site/firmware.bin | cut -f1))"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

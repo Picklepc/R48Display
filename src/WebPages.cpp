@@ -370,13 +370,32 @@ String settingsBody() {
       // OTA card (separate form, multipart)
       "<div class='card wide'>"
       "<h2 style='margin-bottom:12px'>Firmware Update</h2>"
-      "<form method='POST' action='/update' enctype='multipart/form-data'>"
+      "<div id='fwupd'>"
+      "<div style='display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap'>"
+      "<div>"
+      "<div>Installed: <b id='fwupd-current'>&mdash;</b></div>"
+      "<div id='fwupd-latest' class='hint' style='margin-top:2px'></div>"
+      "</div>"
+      "<div style='display:flex;gap:8px'>"
+      "<button type='button' id='fwupd-check' onclick='checkFirmwareUpdate()'>Check for updates</button>"
+      "<button type='button' id='fwupd-install' class='primary' style='display:none' onclick='applyFirmwareUpdate()'>Install</button>"
+      "</div></div>"
+      "<div id='fwupd-status' class='hint' style='margin-top:8px'></div>"
+      "<div id='fwupd-progress-wrap' style='display:none;background:var(--line);border-radius:4px;height:8px;margin-top:8px'>"
+      "<div id='fwupd-progress' style='background:var(--primary);border-radius:4px;height:8px;width:0%;transition:width .3s'></div>"
+      "</div>"
+      "<label class='check' style='margin-top:12px'><input name='auto_update_check' type='checkbox' id='autoUpdCb'> Automatically check for updates</label>"
+      "</div>"
+      "<details style='margin-top:14px'>"
+      "<summary style='cursor:pointer;color:var(--muted);font-size:14px'>Manual upload (advanced)</summary>"
+      "<form method='POST' action='/update' enctype='multipart/form-data' style='margin-top:10px'>"
       "<div class='form-grid' style='margin-bottom:10px'>"
       "<label>Firmware .bin<input type='file' name='firmware' accept='.bin'></label>"
       "</div>"
       "<button class='primary'>Upload &amp; Reboot</button>"
       "</form>"
-      "<p class='hint' style='margin-top:10px'>Embedded OTA updater. Select the compiled .bin and click Upload. The device reboots automatically after a successful flash.</p>"
+      "<p class='hint' style='margin-top:10px'>Flash a specific compiled .bin. The device reboots automatically after a successful flash.</p>"
+      "</details>"
       "</div>"
 
       "</section>");
@@ -1040,6 +1059,9 @@ function wireActions() {
   document.getElementById('anim-type-select')?.addEventListener('change', e => {
     postForm('/api/settings', {anim_type: e.target.value});
   });
+  document.getElementById('autoUpdCb')?.addEventListener('change', e => {
+    postForm('/api/settings', {auto_update_check: e.target.checked ? '1' : '0'});
+  });
   let brightnessTimer = null;
   document.querySelector('[name=brightness]')?.addEventListener('input', e => {
     clearTimeout(brightnessTimer);
@@ -1093,6 +1115,7 @@ loadSettings().then(() => {
   const animCb = document.getElementById('animEnabledCb');
   if (animCb) toggleAnimOptions(animCb.checked);
 });
+if ($('fwupd-current')) loadUpdateStatus();
 // ── Pay stats (dashboard) ─────────────────────────────────────────────────────
 async function loadPayStats() {
   const wrap = $('dash-pay-wrap');
@@ -1108,6 +1131,90 @@ async function loadPayStats() {
   el.textContent = resp.records.length === 1
     ? `${resp.records[0].label||'$'}${(parseFloat(resp.records[0].earned)||0).toFixed(2)}`
     : `${resp.records[0].label||'$'}${total.toFixed(2)}`;
+}
+
+// ── Firmware self-update ──────────────────────────────────────────────────────
+let _fwupdPoll = null;
+
+function renderUpdateStatus(s) {
+  const cur = $('fwupd-current'); if (cur) cur.textContent = 'v' + s.current;
+  const auto = $('autoUpdCb'); if (auto) auto.checked = !!s.auto;
+  const latest = $('fwupd-latest');
+  const status = $('fwupd-status');
+  const install = $('fwupd-install');
+  const check = $('fwupd-check');
+  const pwrap = $('fwupd-progress-wrap');
+  const pbar = $('fwupd-progress');
+  const busy = !!s.busy;
+  if (check) check.disabled = busy;
+  if (s.phase === 'downloading') {
+    if (pwrap) pwrap.style.display = 'block';
+    if (pbar) pbar.style.width = (s.progress || 0) + '%';
+  } else if (pwrap) { pwrap.style.display = 'none'; }
+  if (latest) {
+    if (s.checked && s.latest) latest.textContent = s.available ? `Update available: v${s.latest}` : `Up to date (latest v${s.latest})`;
+    else latest.textContent = '';
+  }
+  if (install) {
+    install.style.display = (s.available && !busy) ? '' : 'none';
+    if (s.available) install.textContent = `Install v${s.latest}`;
+  }
+  if (status) {
+    if (s.phase === 'checking') status.textContent = 'Checking GitHub…';
+    else if (s.phase === 'downloading') status.textContent = `Installing… ${s.progress || 0}% — do not power off. The device reboots when done.`;
+    else if (s.phase === 'error') status.textContent = s.error || 'Update error';
+    else status.textContent = '';
+  }
+}
+
+async function loadUpdateStatus() {
+  const s = await fetch('/api/update/status', {cache:'no-store'}).then(r => r.ok ? r.json() : null).catch(() => null);
+  if (s) renderUpdateStatus(s);
+}
+
+function stopUpdatePolling() { if (_fwupdPoll) { clearInterval(_fwupdPoll); _fwupdPoll = null; } }
+function startUpdatePolling() {
+  stopUpdatePolling();
+  _fwupdPoll = setInterval(async () => {
+    const s = await fetch('/api/update/status', {cache:'no-store'}).then(r => r.ok ? r.json() : null).catch(() => null);
+    if (!s) return;  // device may be rebooting mid-update
+    renderUpdateStatus(s);
+    if (!s.busy && s.phase !== 'checking' && s.phase !== 'downloading') stopUpdatePolling();
+  }, 1500);
+}
+
+async function checkFirmwareUpdate() {
+  const status = $('fwupd-status'); if (status) status.textContent = 'Checking GitHub…';
+  const res = await fetch('/api/update/check', {method:'POST'}).catch(() => null);
+  if (!res || !res.ok) { if (status) status.textContent = 'Could not start check (device offline?)'; return; }
+  startUpdatePolling();
+}
+
+async function applyFirmwareUpdate() {
+  if (!confirm('Download and install the latest firmware now? The device will reboot and be offline for 1–2 minutes.')) return;
+  const status = $('fwupd-status'); if (status) status.textContent = 'Starting update…';
+  const install = $('fwupd-install'); if (install) install.style.display = 'none';
+  const res = await fetch('/api/update/apply', {method:'POST'}).catch(() => null);
+  if (!res || !res.ok) { if (status) status.textContent = 'Could not start update.'; loadUpdateStatus(); return; }
+  startUpdatePolling();
+  watchForReboot();
+}
+
+function watchForReboot() {
+  const startedVer = $('fwupd-current')?.textContent;
+  let sawOffline = false;
+  const timer = setInterval(async () => {
+    const st = await fetch('/api/status', {cache:'no-store'}).then(r => r.ok ? r.json() : null).catch(() => null);
+    if (!st) { sawOffline = true; return; }  // offline window during reboot
+    if (sawOffline && st.firmware && ('v' + st.firmware) !== startedVer) {
+      clearInterval(timer);
+      stopUpdatePolling();
+      const status = $('fwupd-status');
+      if (status) status.textContent = `Updated to v${st.firmware}. Reloading…`;
+      setTimeout(() => location.reload(), 1500);
+    }
+  }, 3000);
+  setTimeout(() => clearInterval(timer), 240000);  // give up after 4 min
 }
 
 refresh();

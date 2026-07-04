@@ -1,3 +1,23 @@
+# R48Display v0.3.6 — Release Notes
+
+**OTA from v0.3.0 or later is safe** — partition table is unchanged.
+
+## What's New in 0.3.6
+
+### One-click Web Installer
+- New browser-based installer at **https://picklepc.github.io/R48Display/** — flash a brand-new board over USB straight from Chrome or Edge, no tools to download
+- Walks through plug-in, click, and port selection; always serves the latest published release
+- Preserves saved settings when re-flashing (the storage area is left untouched)
+
+### Automatic Firmware Updates
+- The device now checks GitHub for new releases and can **download and install them itself over Wi-Fi** — no PC required
+- **Settings → Firmware Update** shows the installed version, a "Check for updates" button, and a one-click **Install** when a newer release is available, with a live progress bar
+- **Automatically check for updates** toggle (on by default) does a background check a few times a day and flags when an update is waiting
+- Manual .bin upload is still available under an "advanced" section for flashing a specific build
+- Bluetooth is paused during the download to free memory for the secure connection; the dual-slot OTA layout means a failed update rolls back to the current firmware
+
+---
+
 # R48Display v0.3.5 — Release Notes
 
 **OTA from v0.3.0 or later is safe** — partition table is unchanged.

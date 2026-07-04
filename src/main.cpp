@@ -8,6 +8,8 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
+#include <WiFiClientSecure.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <math.h>
@@ -298,6 +300,7 @@ struct AppSettings {
   float weatherLon = 0.0f;
   bool trackDailyActivity = true;
   bool trackPay           = false;
+  bool autoUpdateCheck    = true;
 };
 
 struct BatterySample {
@@ -3291,6 +3294,7 @@ void loadSettings() {
   hoursWorking = prefs.getFloat("hrsWork", 0.0f);
   settings.trackDailyActivity = prefs.getBool("trackHday", true);
   settings.trackPay           = prefs.getBool("trackPay",  false);
+  settings.autoUpdateCheck    = prefs.getBool("autoUpd",   true);
   lastKnownTs = prefs.getUInt("lastTs", 0);
   prefs.end();
 
@@ -3383,6 +3387,7 @@ void saveSettings() {
   prefs.putFloat("wxLon", settings.weatherLon);
   prefs.putBool("trackHday", settings.trackDailyActivity);
   prefs.putBool("trackPay",  settings.trackPay);
+  prefs.putBool("autoUpd",   settings.autoUpdateCheck);
   prefs.end();
 }
 
@@ -4540,6 +4545,7 @@ void apiSettingsGet() {
   doc["zip_code"]     = settings.zipCode;
   doc["track_daily_activity"] = settings.trackDailyActivity;
   doc["track_pay"]            = settings.trackPay;
+  doc["auto_update_check"]    = settings.autoUpdateCheck;
   doc["ota_password_set"] = settings.otaPassword.length() >= 8;
   doc["wifi_ssid"] = settings.wifiSsid;
   doc["wifi_password_set"] = !settings.wifiPassword.isEmpty();
@@ -4625,6 +4631,7 @@ void apiSettingsPost() {
   }
   if (server.hasArg("track_daily_activity")) settings.trackDailyActivity = server.arg("track_daily_activity") == "1" || server.arg("track_daily_activity") == "on" || server.arg("track_daily_activity") == "true";
   if (server.hasArg("track_pay"))            settings.trackPay           = server.arg("track_pay")            == "1" || server.arg("track_pay")            == "on" || server.arg("track_pay")            == "true";
+  if (server.hasArg("auto_update_check"))    settings.autoUpdateCheck    = server.arg("auto_update_check")    == "1" || server.arg("auto_update_check")    == "on" || server.arg("auto_update_check")    == "true";
   if (server.hasArg("wifi_ssid")) settings.wifiSsid = server.arg("wifi_ssid").substring(0, 32);
   if (server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0) settings.wifiPassword = server.arg("wifi_password").substring(0, 64);
   if (server.hasArg("bms_name")) settings.bmsName = server.arg("bms_name").substring(0, 32);
@@ -4886,6 +4893,217 @@ void apiBatteryOff() {
   triggerBatteryOff();
 }
 
+// ── Firmware self-update (GitHub Releases) ───────────────────────────────────
+// Checks the repo's latest release tag and, on request, pulls the app image
+// straight from the release and applies it via the OTA slot. Runs on a
+// dedicated core-0 task so the web server stays responsive for status polls.
+static const char *kUpdateRepo = "Picklepc/R48Display";
+
+struct FirmwareUpdateState {
+  String   latestVersion;        // "0.3.6" (v-stripped); empty until first check
+  String   latestTag;            // raw tag as GitHub has it, e.g. "v0.3.6"
+  bool     available   = false;  // latest > running
+  bool     busy        = false;  // a check or download is in flight
+  String   phase       = "idle"; // idle | checking | downloading | error
+  String   error;                // last error message for the UI
+  int      progress    = 0;      // 0-100 during download
+  bool     checked     = false;  // at least one check has completed
+};
+static FirmwareUpdateState gFwUpd;
+static SemaphoreHandle_t   fwUpdMux        = nullptr;
+static TaskHandle_t        fwUpdTaskHandle = nullptr;
+static volatile bool       fwUpdateActive  = false;  // pauses BLE loop during flash
+
+static constexpr uint32_t FWUPD_CHECK_BIT = 0x01;
+static constexpr uint32_t FWUPD_APPLY_BIT = 0x02;
+
+static void fwUpdSetPhase(const char *phase, const String &err = "") {
+  if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
+    gFwUpd.phase = phase;
+    gFwUpd.error = err;
+    xSemaphoreGive(fwUpdMux);
+  }
+}
+
+static void parseVersion(const String &in, int &major, int &minor, int &patch) {
+  major = minor = patch = 0;
+  String s = in;
+  if (s.length() && (s[0] == 'v' || s[0] == 'V')) s = s.substring(1);
+  const int d1 = s.indexOf('.');
+  if (d1 < 0) { major = s.toInt(); return; }
+  major = s.substring(0, d1).toInt();
+  const int d2 = s.indexOf('.', d1 + 1);
+  if (d2 < 0) { minor = s.substring(d1 + 1).toInt(); return; }
+  minor = s.substring(d1 + 1, d2).toInt();
+  patch = s.substring(d2 + 1).toInt();
+}
+
+static bool versionIsNewer(const String &candidate, const String &base) {
+  int ca, cb, cc, ba, bb, bc;
+  parseVersion(candidate, ca, cb, cc);
+  parseVersion(base, ba, bb, bc);
+  if (ca != ba) return ca > ba;
+  if (cb != bb) return cb > bb;
+  return cc > bc;
+}
+
+static bool fwUpdFetchLatestTag(String &tag) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  WiFiClientSecure client;
+  client.setInsecure();  // integrity comes from the OTA image validation, not the cert
+  HTTPClient http;
+  http.setTimeout(12000);
+  http.setReuse(false);
+  http.useHTTP10(true);  // avoid chunked transfer-encoding so the stream parses cleanly
+  http.addHeader("User-Agent", "R48Display");           // GitHub API rejects UA-less requests
+  http.addHeader("Accept", "application/vnd.github+json");
+  const String url = "https://api.github.com/repos/" + String(kUpdateRepo) + "/releases/latest";
+  if (!http.begin(client, url)) return false;
+  const int code = http.GET();
+  if (code != 200) { http.end(); return false; }
+  JsonDocument filter; filter["tag_name"] = true;       // stream-parse only the tag
+  JsonDocument doc;
+  const DeserializationError err =
+      deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (err) return false;
+  tag = String(doc["tag_name"] | "");
+  return tag.length() > 0;
+}
+
+static void fwUpdDoCheck() {
+  if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
+    gFwUpd.busy = true; gFwUpd.phase = "checking"; xSemaphoreGive(fwUpdMux);
+  }
+  String tag;
+  const bool ok = fwUpdFetchLatestTag(tag);
+  if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
+    gFwUpd.busy = false;
+    gFwUpd.checked = true;
+    if (ok) {
+      String ver = tag;
+      if (ver.length() && (ver[0] == 'v' || ver[0] == 'V')) ver = ver.substring(1);
+      gFwUpd.latestTag = tag;
+      gFwUpd.latestVersion = ver;
+      gFwUpd.available = versionIsNewer(ver, FIRMWARE_VERSION);
+      gFwUpd.phase = "idle";
+      gFwUpd.error = "";
+    } else {
+      gFwUpd.phase = "error";
+      gFwUpd.error = "Could not reach GitHub";
+    }
+    xSemaphoreGive(fwUpdMux);
+  }
+}
+
+static void fwUpdDoApply() {
+  String tag;
+  if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
+    tag = gFwUpd.latestTag;
+    gFwUpd.busy = true;
+    gFwUpd.phase = "downloading";
+    gFwUpd.progress = 0;
+    gFwUpd.error = "";
+    xSemaphoreGive(fwUpdMux);
+  }
+  if (tag.isEmpty()) { fwUpdSetPhase("error", "No release selected"); return; }
+
+  // Free internal heap for the TLS session by tearing BLE down, and stop the
+  // main loop from touching the NimBLE stack concurrently while we do.
+  fwUpdateActive = true;
+  delay(50);
+  NimBLEDevice::deinit(true);
+  bms.initialized = false;
+  bms.connected = false;
+  bms.authenticated = false;
+  bms.status = "paused for update";
+
+  const String url = "https://github.com/" + String(kUpdateRepo) +
+                     "/releases/download/" + tag + "/firmware.bin";
+  WiFiClientSecure client;
+  client.setInsecure();
+  httpUpdate.rebootOnUpdate(true);
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // github.com -> CDN
+  httpUpdate.onProgress([](int cur, int total) {
+    if (total > 0 && fwUpdMux && xSemaphoreTake(fwUpdMux, 0) == pdTRUE) {
+      gFwUpd.progress = (int)((int64_t)cur * 100 / total);
+      xSemaphoreGive(fwUpdMux);
+    }
+  });
+
+  const t_httpUpdate_return ret = httpUpdate.update(client, url);
+  // Reaching here means it did NOT reboot → treat as failure.
+  String msg;
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      msg = "Download failed (" + String(httpUpdate.getLastError()) + "): " +
+            httpUpdate.getLastErrorString();
+      break;
+    case HTTP_UPDATE_NO_UPDATES: msg = "Server had no update"; break;
+    default:                     msg = "Update did not complete"; break;
+  }
+  if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
+    gFwUpd.busy = false;
+    gFwUpd.phase = "error";
+    gFwUpd.error = msg;
+    xSemaphoreGive(fwUpdMux);
+  }
+  // Bring BLE back so the device keeps working after a failed attempt.
+  bleBms.begin();
+  fwUpdateActive = false;
+}
+
+static void fwUpdTask(void *) {
+  vTaskDelay(pdMS_TO_TICKS(25000));  // let Wi-Fi/NTP settle after boot
+  if (settings.autoUpdateCheck) fwUpdDoCheck();
+  for (;;) {
+    uint32_t bits = 0;
+    const TickType_t wait = settings.autoUpdateCheck
+        ? pdMS_TO_TICKS(6UL * 60UL * 60UL * 1000UL)  // re-check every 6 h
+        : portMAX_DELAY;
+    xTaskNotifyWait(0, ULONG_MAX, &bits, wait);
+    if (bits & FWUPD_APPLY_BIT) fwUpdDoApply();
+    else                        fwUpdDoCheck();  // manual notify or periodic timeout
+  }
+}
+
+void apiUpdateStatus() {
+  JsonDocument doc;
+  doc["current"] = FIRMWARE_VERSION;
+  doc["auto"]    = settings.autoUpdateCheck;
+  if (fwUpdMux && xSemaphoreTake(fwUpdMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+    doc["checked"]   = gFwUpd.checked;
+    doc["latest"]    = gFwUpd.latestVersion;
+    doc["available"] = gFwUpd.available;
+    doc["busy"]      = gFwUpd.busy;
+    doc["phase"]     = gFwUpd.phase;
+    doc["progress"]  = gFwUpd.progress;
+    doc["error"]     = gFwUpd.error;
+    xSemaphoreGive(fwUpdMux);
+  }
+  sendJson(doc);
+}
+
+void apiUpdateCheck() {
+  if (!fwUpdTaskHandle) { server.send(503, "application/json", F("{\"error\":\"not_ready\"}")); return; }
+  if (WiFi.status() != WL_CONNECTED) { server.send(503, "application/json", F("{\"error\":\"offline\"}")); return; }
+  xTaskNotify(fwUpdTaskHandle, FWUPD_CHECK_BIT, eSetBits);
+  server.send(200, "application/json", F("{\"ok\":true}"));
+}
+
+void apiUpdateApply() {
+  if (!fwUpdTaskHandle) { server.send(503, "application/json", F("{\"error\":\"not_ready\"}")); return; }
+  if (WiFi.status() != WL_CONNECTED) { server.send(503, "application/json", F("{\"error\":\"offline\"}")); return; }
+  bool ok = false;
+  if (fwUpdMux && xSemaphoreTake(fwUpdMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+    ok = gFwUpd.available && !gFwUpd.busy;
+    xSemaphoreGive(fwUpdMux);
+  }
+  if (!ok) { server.send(409, "application/json", F("{\"error\":\"no_update\"}")); return; }
+  xTaskNotify(fwUpdTaskHandle, FWUPD_APPLY_BIT, eSetBits);
+  server.send(200, "application/json", F("{\"ok\":true,\"note\":\"Update starting; device will reboot\"}"));
+}
+
 // CSRF guard: browsers attach an Origin header to cross-site requests. Reject
 // state-changing requests whose Origin host doesn't match the Host header.
 // Requests without an Origin (curl, scripts, HA integrations) pass through.
@@ -4997,6 +5215,9 @@ void setupRoutes() {
   server.on("/api/mqtt/rediscover", HTTP_POST, guarded(apiMqttRediscover));
   server.on("/api/mqtt/test", HTTP_GET, apiMqttTest);
   server.on("/api/weather", HTTP_GET, apiWeatherGet);
+  server.on("/api/update/status", HTTP_GET,  apiUpdateStatus);
+  server.on("/api/update/check",  HTTP_POST, guarded(apiUpdateCheck));
+  server.on("/api/update/apply",  HTTP_POST, guarded(apiUpdateApply));
   server.onNotFound([]() {
     server.sendHeader("Location", "/", true);
     server.send(302, "text/plain", "");
@@ -5082,6 +5303,8 @@ void setup() {
   setupRoutes();
   weatherMux = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(weatherTask, "weather", 12288, nullptr, 1, &weatherTaskHandle, 0);
+  fwUpdMux = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(fwUpdTask, "fwupd", 16384, nullptr, 1, &fwUpdTaskHandle, 0);
   drawDisplay(true);
   Serial.printf("WiFi mode: %s\n", provisioningActive ? "setup AP" : "STA");
   Serial.printf("Touch %s\n", touchReady ? "ready" : "missing");
@@ -5091,7 +5314,7 @@ void loop() {
   server.handleClient();
   ArduinoOTA.handle();
   maintainWiFi();
-  bleBms.loop();
+  if (!fwUpdateActive) bleBms.loop();  // BLE stack is torn down during a self-update
   updateSocRate();
   updateDegradation();
   updateMqtt();
