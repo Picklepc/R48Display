@@ -47,7 +47,9 @@ detection behavior, and BMS profile from the web settings.
 - Wi-Fi STA mode for normal use.
 - Temporary AP-only setup mode when no Wi-Fi credentials are saved or BOOT is
   held during startup.
-- OTA update through PlatformIO or the embedded web updater.
+- Automatic over-the-air self-update: the device checks GitHub for new releases
+  and installs them itself over Wi-Fi. Manual OTA through PlatformIO or the
+  embedded web uploader is still available.
 - Optional MQTT publishing for Home Assistant and other automation systems.
   Opt-in; disabled by default. See [MQTT / Home Assistant](#mqtt--home-assistant).
 - Optional onboard board-battery reading when the variant has that circuit.
@@ -89,6 +91,40 @@ independently.
 - Works without SD card.
 - Works without the onboard battery populated.
 - Does not require gyro/IMU hardware.
+
+## Install
+
+### Easiest — web installer (nothing to download)
+
+Open **https://picklepc.github.io/R48Display/** in Google Chrome or Microsoft
+Edge on a desktop computer, plug the board in with a **USB-C data cable** (not a
+charge-only cable), and click **Install R48Display**. The page flashes the latest
+release over USB and the device reboots into setup mode. Re-flashing keeps your
+saved settings.
+
+The installer uses Web Serial, which works in Chrome and Edge only — not Firefox
+or Safari.
+
+### Updating
+
+Once the device is on Wi-Fi it updates itself — no PC required. Open **Settings →
+Firmware Update**, click **Check for updates**, then **Install** when a newer
+release is available; the device downloads it from GitHub and reboots into the new
+version. Leave **Automatically check for updates** enabled and it flags new
+releases for you.
+
+### Manual / recovery flashing
+
+Download the merged binary from the
+[latest release](https://github.com/Picklepc/R48Display/releases/latest) and flash
+it at offset `0x0`:
+
+```sh
+esptool.py --chip esp32s3 --port YOUR_PORT write_flash 0x0 R48Display-vX.Y.Z-merged.bin
+```
+
+You can also use the [ESP32 Flash Download Tool](https://www.espressif.com/en/support/download/other-tools)
+with the offset set to `0x0`, or build and flash from source (see [Build](#build)).
 
 ## Pinout
 
@@ -234,11 +270,13 @@ See `docs/POWER_MANAGEMENT.md` for the full decision tree and power budget.
 
 ## Release Artifacts
 
-Firmware binaries are built by CI and attached to GitHub Releases. Do not flash
-`.bin` files from the `firmware/` directory in the repository directly — use the
-release artifacts or build from source to ensure you have the latest version.
+Firmware binaries are built by CI and attached to each
+[GitHub Release](https://github.com/Picklepc/R48Display/releases). For most people
+the [web installer](#install) or the device's built-in self-update is the easiest
+path — both pull these same artifacts automatically. Per-version release notes are
+in [`CHANGELOG.md`](CHANGELOG.md) and [`docs/releases/`](docs/releases/).
 
-To flash the merged binary at offset `0x0` with `esptool.py`:
+For a manual or recovery flash with `esptool.py`:
 
 ```sh
 esptool.py --chip esp32s3 --port YOUR_PORT erase_flash
@@ -252,6 +290,7 @@ already installed.
 
 ## Documentation
 
+- [`CHANGELOG.md`](CHANGELOG.md) — per-version release notes index
 - [`TASKS.md`](TASKS.md) — development task list by milestone
 - [`VALIDATION.md`](VALIDATION.md) — release validation checklist
 - [`PROMPT.md`](PROMPT.md) — development philosophy and rules
