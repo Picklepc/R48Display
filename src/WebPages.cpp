@@ -488,9 +488,18 @@ String maintenanceBody() {
       "<label>Payee Name<input id='pf-payee' maxlength='40' autocomplete='off' placeholder='Alex'></label>"
       "<label>Hourly Rate<input id='pf-rate' type='number' min='0' step='0.01' placeholder='12.00'></label>"
       "<label>Currency / Label<input id='pf-label' maxlength='8' autocomplete='off' placeholder='$'></label>"
-      "<label>Period Start Date<input id='pf-start' type='date'></label>"
+      "<label>Period Start<span class='hint'>Date &amp; time this pay period began. Edit to back-date a forgotten period.</span><input id='pf-start' type='datetime-local'></label>"
       "<label>Notes (optional)<input id='pf-notes' maxlength='80' autocomplete='off'></label>"
       "</div>"
+      "<details style='margin-top:10px'>"
+      "<summary style='cursor:pointer;color:var(--muted);font-size:13px'>Or start at working-hours into a day</summary>"
+      "<p class='hint' style='margin:8px 0'>Back-date the start to a point inside a day's mowing &mdash; e.g. start after the first 1.5 hours so an earlier session goes to someone else. Overrides the date &amp; time above.</p>"
+      "<div style='display:flex;gap:8px;align-items:flex-end'>"
+      "<label style='flex:1'>Day<input id='pf-start-day' type='date' onchange='payStartDayInfo()'></label>"
+      "<label style='width:120px'>Hours into day<input id='pf-start-hours' type='number' min='0' step='0.1' placeholder='0'></label>"
+      "</div>"
+      "<div id='pf-start-dayinfo' class='hint' style='margin-top:6px'></div>"
+      "</details>"
       "<input type='hidden' id='pf-id' value='0'>"
       "<div style='display:flex;gap:8px;margin-top:14px'>"
       "<button class='primary' onclick='submitPayForm()'>Save</button>"
@@ -505,6 +514,8 @@ String maintenanceBody() {
       "<h3>Mark Paid \xe2\x80\x94 <span id='pc-payee'></span></h3>"
       "<div id='pay-confirm-summary' style='background:var(--panel2);border-radius:8px;padding:12px;margin-bottom:14px;font-size:14px;line-height:1.7'></div>"
       "<div class='form-grid'>"
+      "<label>Close at<span class='hint' id='pc-close-hint'>Leave blank to close now (all hours so far). Set to N working-hours of today to split the day &mdash; the next period picks up where this ends.</span>"
+      "<input id='pc-close' type='number' min='0' step='0.1'></label>"
       "<label>Amount paid<span class='hint'>Leave blank to use the calculated amount. Enter a different value for bonuses or adjustments.</span>"
       "<input id='pc-amount' type='number' min='0' step='0.01' placeholder='Leave blank to use calculated'></label>"
       "<label>Notes<input id='pc-notes' maxlength='80' autocomplete='off' placeholder='e.g. paid in cash'></label>"
@@ -1122,7 +1133,7 @@ async function loadPayStats() {
   const el   = $('dash-pay');
   if (!wrap || !el) return;
   const resp = await fetch('/api/pay',{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
-  if (!resp || !resp.track_pay || !resp.hday_enabled || !resp.records?.length) {
+  if (!resp || !resp.track_pay || !resp.records?.length) {
     wrap.style.display = 'none'; return;
   }
   let total = 0;
@@ -1226,13 +1237,19 @@ setInterval(refreshWeather, 5 * 60 * 1000);
 let _payRecords = [];
 
 function _fmtDate(ts) {
-  return ts ? new Date(ts * 1000).toLocaleDateString() : '&mdash;';
+  if (!ts) return '&mdash;';
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString([], {month:'numeric',day:'numeric',year:'2-digit'}) + ' ' +
+         d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
 }
 function _fmtAmt(lbl, amt) {
   return `${escAttr(lbl)}${parseFloat(amt).toFixed(2)}`;
 }
 function _ymd(dt) {
   return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+}
+function _ymdhm(dt) {
+  return `${_ymd(dt)}T${String(dt.getHours()).padStart(2,'0')}:${String(dt.getMinutes()).padStart(2,'0')}`;
 }
 
 async function loadPay() {
@@ -1245,7 +1262,6 @@ async function loadPay() {
     return;
   }
   if (section) section.style.display = '';
-  const hdayOn = !!resp.hday_enabled;
   _payRecords = resp.records || [];
   if (!_payRecords.length) {
     host.innerHTML = "<div class='empty'>No payees configured &mdash; add one above.</div>";
@@ -1257,8 +1273,8 @@ async function loadPay() {
     const rate     = parseFloat(pr.rate)   || 0;
     const lbl      = pr.label || '$';
     const startTs  = parseInt(pr.period_start) || 0;
-    const earnStr  = hdayOn ? _fmtAmt(lbl, earned)        : '&mdash;';
-    const workStr  = hdayOn ? `${workH.toFixed(1)}\xa0h`  : '&mdash;';
+    const earnStr  = _fmtAmt(lbl, earned);
+    const workStr  = `${workH.toFixed(1)}\xa0h`;
     const sinceStr = startTs ? _fmtDate(startTs) : 'Not set';
     return `<div class='card' style='margin-bottom:10px'>
       <div class='section-head' style='margin-bottom:8px'>
@@ -1277,7 +1293,6 @@ async function loadPay() {
         <div class='metric'><div class='label'>Working Hours</div><div class='value'>${workStr}</div></div>
         <div class='metric'><div class='label'>Earned</div><div class='value'>${earnStr}</div></div>
       </div>
-      ${!hdayOn ? "<p style='font-size:12px;color:var(--muted);margin:4px 0 8px'>Enable activity tracking in Settings to record working hours.</p>" : ''}
       ${pr.notes ? `<p style='font-size:12px;color:var(--muted);margin:6px 0 8px'>${escAttr(pr.notes)}</p>` : ''}
       <button class='primary' style='margin-top:4px' onclick='openPayConfirm(${pr.id})'>Mark Paid</button>
     </div>`;
@@ -1292,23 +1307,43 @@ function openPayForm(id) {
   $('pf-label').value = pr ? pr.label : '$';
   $('pf-notes').value = pr ? pr.notes : '';
   const ts = pr ? parseInt(pr.period_start) : 0;
-  $('pf-start').value = _ymd(ts ? new Date(ts * 1000) : new Date());
+  $('pf-start').value = _ymdhm(ts ? new Date(ts * 1000) : new Date());
+  $('pf-start-day').value = '';
+  $('pf-start-hours').value = '';
+  $('pf-start-dayinfo').textContent = '';
   $('pay-modal-title').textContent = pr ? `Edit — ${pr.payee}` : 'Add Payee';
   $('pay-modal').style.display = 'flex';
 }
 function closePayForm() { $('pay-modal').style.display = 'none'; }
 
+async function payStartDayInfo() {
+  const day = $('pf-start-day').value;
+  const info = $('pf-start-dayinfo');
+  if (!day) { info.textContent = ''; return; }
+  const d = await fetch(`/api/pay/day?date=${day}`,{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
+  info.textContent = d ? `That day logged ${parseFloat(d.total_h).toFixed(1)} working hours. Enter 0 for the start of the day.`
+                       : 'No data for that day.';
+  if ($('pf-start-hours').value === '') $('pf-start-hours').value = '0';
+}
+
 async function submitPayForm() {
   const startVal = $('pf-start').value;
-  const startTs  = startVal ? Math.floor(new Date(startVal + 'T00:00:00').getTime() / 1000) : 0;
+  const startTs  = startVal ? Math.floor(new Date(startVal).getTime() / 1000) : 0;
   const body = {
-    id:           parseInt($('pf-id').value) || 0,
-    payee:        $('pf-payee').value.trim(),
-    rate:         parseFloat($('pf-rate').value) || 0,
-    label:        $('pf-label').value.trim() || '$',
-    period_start: startTs,
-    notes:        $('pf-notes').value.trim(),
+    id:      parseInt($('pf-id').value) || 0,
+    payee:   $('pf-payee').value.trim(),
+    rate:    parseFloat($('pf-rate').value) || 0,
+    label:   $('pf-label').value.trim() || '$',
+    notes:   $('pf-notes').value.trim(),
   };
+  // Correction tool: "N working-hours into day D" overrides the date/time start.
+  const startDay = $('pf-start-day').value;
+  if (startDay) {
+    body.start_day   = startDay;
+    body.start_hours = parseFloat($('pf-start-hours').value) || 0;
+  } else {
+    body.period_start = startTs;
+  }
   if (!body.payee) { alert('Payee name is required'); return; }
   const res = await fetch('/api/pay', {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
@@ -1325,13 +1360,15 @@ async function deletePayRecord(id) {
   loadPay();
 }
 
-function openPayConfirm(id) {
+async function openPayConfirm(id) {
   const pr = _payRecords.find(p => p.id == id);
   if (!pr) return;
   $('pc-id').value          = pr.id;
   $('pc-payee').textContent = pr.payee;
   $('pc-amount').value = '';
   $('pc-notes').value  = '';
+  $('pc-close').value  = '';
+  $('pc-close').placeholder = 'now (all hours so far)';
   const lbl    = pr.label || '$';
   const workH  = parseFloat(pr.work_h) || 0;
   const earned = parseFloat(pr.earned) || 0;
@@ -1341,14 +1378,20 @@ function openPayConfirm(id) {
     `<div><b>Working hours:</b> ${workH.toFixed(1)}\xa0h</div>` +
     `<div><b>Calculated:</b> ${_fmtAmt(lbl, earned)}</div>`;
   $('pay-confirm-modal').style.display = 'flex';
+  // Show today's mowing total so the split field has a reference maximum.
+  const today = _ymd(new Date());
+  const d = await fetch(`/api/pay/day?date=${today}`,{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
+  if (d) $('pc-close').placeholder = `now — today so far: ${parseFloat(d.total_h).toFixed(1)} h`;
 }
 function closePayConfirm() { $('pay-confirm-modal').style.display = 'none'; }
 
 async function confirmPay() {
   const id     = parseInt($('pc-id').value);
   const amtRaw = $('pc-amount').value.trim();
+  const closeRaw = $('pc-close').value.trim();
   const body   = { id, notes: $('pc-notes').value.trim() };
   if (amtRaw !== '') body.amount = parseFloat(amtRaw);
+  if (closeRaw !== '') body.close_hours = parseFloat(closeRaw);
   const res = await fetch('/api/pay/confirm', {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
   }).catch(()=>null);

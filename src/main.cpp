@@ -2662,6 +2662,14 @@ void apiHeatmapGet() {
         p.end();
       }
     }
+    // Today's cell isn't written to NVS until the next day rolls over. Fill it
+    // live from the day-start snapshot so the current day shows in-progress.
+    if (year == curYear && hdaySnapYear == curYear && hdaySnapYday == curYday &&
+        curYday >= 0 && curYday < days) {
+      buf[curYday * 4 + 0] = static_cast<uint8_t>(min(255.0f, max(0.0f, hoursStandby - hdaySnapSta) * 10.0f));
+      buf[curYday * 4 + 1] = static_cast<uint8_t>(min(255.0f, max(0.0f, hoursActive  - hdaySnapAct) * 10.0f));
+      buf[curYday * 4 + 2] = static_cast<uint8_t>(min(255.0f, max(0.0f, hoursWorking - hdaySnapWrk) * 10.0f));
+    }
     server.sendContent("\"");
     server.sendContent(String(year));
     server.sendContent("\":[");
@@ -2763,6 +2771,111 @@ void apiHeatmapExport() {
       yield();
     }
   }
+}
+
+// ── Working-session log (precise pay timekeeping) ────────────────────────────
+// Records the actual [start,end] wall-clock spans the mower spent in the
+// Working state. Pay measures hours between two arbitrary timestamps by
+// intersecting them with these spans, which makes pay periods accurate to the
+// second (not whole-day) and lets an edited period-start date recompute
+// earnings — supporting multiple pay periods in one day and back-dated fixes.
+// This is independent of the daily-activity heatmap (gated on trackPay).
+struct WorkSession { uint32_t start = 0; uint32_t end = 0; };  // end==0 → still open
+static std::vector<WorkSession> workSessions;
+static bool     workSessionOpen   = false;
+static constexpr size_t   WORK_SESSIONS_MAX    = 400;
+static constexpr uint32_t WORK_SESSION_RETAIN_S = 180UL * 24UL * 3600UL;  // ~6 months
+
+static void saveWorkSessions() {
+  Preferences p;
+  if (!p.begin("r48disp", false)) return;
+  if (workSessions.empty()) {
+    p.remove("worklog");
+    p.end();
+    return;
+  }
+  std::vector<uint8_t> buf;
+  buf.reserve(workSessions.size() * 8);
+  for (const auto &s : workSessions) {
+    for (int i = 0; i < 4; i++) buf.push_back((s.start >> (i * 8)) & 0xFF);
+    for (int i = 0; i < 4; i++) buf.push_back((s.end   >> (i * 8)) & 0xFF);
+  }
+  p.putBytes("worklog", buf.data(), buf.size());
+  p.end();
+}
+
+static void loadWorkSessions() {
+  workSessions.clear();
+  workSessionOpen = false;
+  Preferences p;
+  if (!p.begin("r48disp", true)) return;
+  const size_t len = p.getBytesLength("worklog");
+  if (len >= 8 && len % 8 == 0) {
+    std::vector<uint8_t> buf(len);
+    p.getBytes("worklog", buf.data(), len);
+    for (size_t i = 0; i + 8 <= len; i += 8) {
+      WorkSession s;
+      s.start = (uint32_t)buf[i]   | ((uint32_t)buf[i+1] << 8) | ((uint32_t)buf[i+2] << 16) | ((uint32_t)buf[i+3] << 24);
+      s.end   = (uint32_t)buf[i+4] | ((uint32_t)buf[i+5] << 8) | ((uint32_t)buf[i+6] << 16) | ((uint32_t)buf[i+7] << 24);
+      workSessions.push_back(s);
+    }
+  }
+  p.end();
+  // A session left open at shutdown (end==0) is closed at the last time we knew
+  // about, so an off-across-reboot gap is never counted as mowing.
+  if (!workSessions.empty() && workSessions.back().end == 0)
+    workSessions.back().end = max(workSessions.back().start, lastKnownTs);
+}
+
+static void trimWorkSessions() {
+  const uint32_t nowTs = static_cast<uint32_t>(time(nullptr));
+  const uint32_t cutoff = (nowTs > WORK_SESSION_RETAIN_S) ? nowTs - WORK_SESSION_RETAIN_S : 0;
+  auto it = workSessions.begin();
+  while (it != workSessions.end()) {
+    const uint32_t en = (it->end == 0) ? nowTs : it->end;
+    if (en < cutoff && !(workSessionOpen && it == workSessions.end() - 1)) it = workSessions.erase(it);
+    else ++it;
+  }
+  if (workSessions.size() > WORK_SESSIONS_MAX)
+    workSessions.erase(workSessions.begin(), workSessions.begin() + (workSessions.size() - WORK_SESSIONS_MAX));
+}
+
+// Called every hour tick with the current, staleness-guarded Working state.
+static void trackWorkSession(bool working) {
+  if (!settings.trackPay) return;
+  const time_t nowT = time(nullptr);
+  if (nowT < 1700000000L) return;  // need a real clock before we can log spans
+  const uint32_t nowTs = static_cast<uint32_t>(nowT);
+  if (working && !workSessionOpen) {
+    trimWorkSessions();
+    WorkSession s; s.start = nowTs; s.end = 0;
+    workSessions.push_back(s);
+    workSessionOpen = true;
+    saveWorkSessions();   // persist span start
+  } else if (!working && workSessionOpen) {
+    workSessions.back().end = nowTs;
+    workSessionOpen = false;
+    saveWorkSessions();   // persist span end
+  }
+  // While a span stays open we do NOT rewrite NVS every tick. On an unclean
+  // reboot, loadWorkSessions() closes the open span at lastKnownTs (saved every
+  // 60 s by saveHours), so the flash isn't churned during a long mow.
+}
+
+// Working hours between two timestamps, from the session spans.
+static float workBetween(uint32_t fromTs, uint32_t toTs) {
+  if (fromTs == 0 || fromTs >= toTs) return 0.0f;
+  const uint32_t nowTs = static_cast<uint32_t>(time(nullptr));
+  uint64_t secs = 0;
+  for (const auto &s : workSessions) {
+    const uint32_t st = s.start;
+    uint32_t en = s.end;
+    if (en == 0 || en < st) en = (nowTs > st) ? nowTs : st;  // open span runs to now
+    const uint32_t lo = max(st, fromTs);
+    const uint32_t hi = min(en, toTs);
+    if (hi > lo) secs += (hi - lo);
+  }
+  return static_cast<float>(secs) / 3600.0f;
 }
 
 // ── Pay records ───────────────────────────────────────────────────────────────
@@ -2885,35 +2998,64 @@ void clearPayHistoryFor(uint8_t id) {
   prefs.end();
 }
 
+// Working hours in a pay period. Backed by the working-session log so a period
+// boundary at any time of day (or an edited/back-dated start) is exact, and the
+// current day's in-progress mowing is included live.
 static float computePayWorkH(uint32_t fromTs, uint32_t toTs) {
-  if (fromTs == 0 || fromTs >= toTs) return 0.0f;
-  time_t f = static_cast<time_t>(fromTs);
-  time_t t = static_cast<time_t>(toTs);
-  struct tm tmFrom, tmTo;
-  localtime_r(&f, &tmFrom);
-  localtime_r(&t, &tmTo);
-  const int fromYear = tmFrom.tm_year + 1900;
-  const int fromYday = tmFrom.tm_yday;
-  const int toYear   = tmTo.tm_year + 1900;
-  const int toYday   = tmTo.tm_yday;
-  float workH = 0.0f;
-  Preferences p;
-  const bool nvs = p.begin("r48disp", true);
-  for (int yr = fromYear; yr <= toYear; yr++) {
-    const int startDay = (yr == fromYear) ? fromYday : 0;
-    const int endDay   = (yr == toYear)   ? toYday   : daysInYear(yr) - 1;
-    const int days = daysInYear(yr);
-    std::vector<uint8_t> buf(static_cast<size_t>(days * 4), 0);
-    if (nvs) {
-      char key[12]; snprintf(key, sizeof(key), "hday_%d", yr);
-      const size_t stored = p.getBytesLength(key);
-      if (stored == static_cast<size_t>(days * 4)) p.getBytes(key, buf.data(), stored);
-    }
-    for (int d = startDay; d <= endDay; d++) workH += blobGet(buf, d, 2);
-    yield();
+  return workBetween(fromTs, toTs);
+}
+
+// ── Hours-into-a-day boundary conversion (pay period correction tool) ────────
+// Lets the UI express a period edge as "N working hours into day D" instead of
+// a clock time. Local-midnight bounds for a YYYY-MM-DD string:
+static bool payDayBounds(const String &dateStr, uint32_t &dayStart, uint32_t &dayEnd) {
+  int y = 0, mon = 0, d = 0;
+  if (sscanf(dateStr.c_str(), "%d-%d-%d", &y, &mon, &d) != 3) return false;
+  if (y < 2020 || mon < 1 || mon > 12 || d < 1 || d > 31) return false;
+  struct tm tmv = {};
+  tmv.tm_year = y - 1900; tmv.tm_mon = mon - 1; tmv.tm_mday = d;
+  tmv.tm_isdst = -1;
+  const time_t t = mktime(&tmv);
+  if (t <= 0) return false;
+  dayStart = static_cast<uint32_t>(t);
+  dayEnd   = dayStart + 86400UL;
+  return true;
+}
+
+// Timestamp at which cumulative working time within [dayStart,dayEnd) reaches
+// `hours`. 0 → day start; ≥ the day's total → end of the last span that day.
+static uint32_t payTsForDayHours(uint32_t dayStart, uint32_t dayEnd, float hours) {
+  if (hours <= 0.0f) return dayStart;
+  const uint32_t nowTs = static_cast<uint32_t>(time(nullptr));
+  const uint64_t targetSecs = static_cast<uint64_t>(hours * 3600.0f + 0.5f);
+  uint64_t acc = 0;
+  uint32_t lastHi = dayStart;
+  for (const auto &s : workSessions) {
+    const uint32_t st = s.start;
+    uint32_t en = (s.end == 0 || s.end < st) ? (nowTs > st ? nowTs : st) : s.end;
+    const uint32_t lo = max(st, dayStart);
+    const uint32_t hi = min(en, dayEnd);
+    if (hi <= lo) continue;
+    const uint64_t span = hi - lo;
+    if (acc + span >= targetSecs) return lo + static_cast<uint32_t>(targetSecs - acc);
+    acc += span;
+    lastHi = hi;
   }
-  if (nvs) p.end();
-  return workH;
+  return lastHi;  // asked for more hours than the day held
+}
+
+// GET /api/pay/day?date=YYYY-MM-DD → that day's working total (for the editor).
+void apiPayDayGet() {
+  uint32_t ds, de;
+  if (!payDayBounds(server.arg("date"), ds, de)) {
+    server.send(400, "application/json", F("{\"error\":\"bad_date\"}"));
+    return;
+  }
+  JsonDocument doc;
+  doc["date"]     = server.arg("date");
+  doc["start_ts"] = ds;
+  doc["total_h"]  = serialized(String(workBetween(ds, de), 2));
+  sendJson(doc);
 }
 
 void apiPayGet() {
@@ -2961,7 +3103,15 @@ void apiPayPost() {
   if (!in["payee"].isNull())        rec.payee       = String(in["payee"] | "").substring(0, 40);
   if (!in["rate"].isNull())         rec.rate        = max(0.0f, (float)(in["rate"] | 0.0));
   if (!in["label"].isNull())        rec.label       = String(in["label"] | "$").substring(0, 8);
-  if (!in["period_start"].isNull()) rec.periodStart = in["period_start"] | (uint32_t)0;
+  // Period start: either a raw timestamp, or "N working-hours into day D"
+  // (correction tool) which we convert to an exact timestamp via the log.
+  if (!in["start_day"].isNull()) {
+    uint32_t ds, de;
+    if (payDayBounds(String(in["start_day"] | ""), ds, de))
+      rec.periodStart = payTsForDayHours(ds, de, max(0.0f, (float)(in["start_hours"] | 0.0)));
+  } else if (!in["period_start"].isNull()) {
+    rec.periodStart = in["period_start"] | (uint32_t)0;
+  }
   if (!in["notes"].isNull())        rec.notes       = String(in["notes"] | "").substring(0, 80);
   rec.payee.trim();
   if (rec.payee.isEmpty()) {
@@ -3003,7 +3153,20 @@ void apiPayConfirm() {
     server.send(503, "application/json", F("{\"error\":\"no_time\"}"));
     return;
   }
-  const float workH    = computePayWorkH(pr->periodStart, now);
+  // Close point: normally now, but the correction tool can close at "N
+  // working-hours into today" to split a day between people. The next period
+  // begins exactly where this one ends, so no mowing time is lost or doubled.
+  uint32_t closeTs = now;
+  if (!in["close_hours"].isNull()) {
+    time_t tnow = static_cast<time_t>(now);
+    struct tm lt; localtime_r(&tnow, &lt);
+    lt.tm_hour = 0; lt.tm_min = 0; lt.tm_sec = 0; lt.tm_isdst = -1;
+    const uint32_t ds = static_cast<uint32_t>(mktime(&lt));  // local midnight today
+    closeTs = payTsForDayHours(ds, ds + 86400UL, max(0.0f, (float)(in["close_hours"] | 0.0)));
+    if (closeTs < pr->periodStart) closeTs = pr->periodStart;
+    if (closeTs > now)             closeTs = now;
+  }
+  const float workH    = computePayWorkH(pr->periodStart, closeTs);
   const float computed = workH * pr->rate;
   const float amount   = !in["amount"].isNull()
                          ? max(0.0f, (float)in["amount"]) : computed;
@@ -3012,7 +3175,7 @@ void apiPayConfirm() {
   auto &hist = payHistory[id];
   PayHistoryEntry entry;
   entry.fromTs = pr->periodStart;
-  entry.toTs   = now;
+  entry.toTs   = closeTs;
   entry.workH  = workH;
   entry.amount = amount;
   entry.notes  = notes;
@@ -3020,7 +3183,7 @@ void apiPayConfirm() {
   if (hist.size() > PAY_HISTORY_MAX)
     hist.erase(hist.begin(), hist.begin() + (hist.size() - PAY_HISTORY_MAX));
   savePayHistoryFor(id);
-  pr->periodStart = now;
+  pr->periodStart = closeTs;
   savePayRecords();
   JsonDocument doc;
   doc["ok"]     = true;
@@ -3811,6 +3974,7 @@ void updateHours() {
   const float deltaH = (now - lastHoursTickMs) / 3600000.0f;
   lastHoursTickMs = now;
   const bool boardBatteryOk = !screenBattery.present || screenBattery.percent >= settings.boardBatteryLowPct;
+  bool working = false;
   if (bms.lastAnalogMs > 0 && boardBatteryOk) {
     hoursTotal += deltaH;
     const ActivityState state = activityState();
@@ -3820,7 +3984,11 @@ void updateHours() {
       case ActivityState::Charging: /* charging time in total only */                      break;
       default:                      hoursStandby += deltaH;                                break;
     }
+    // Only log a pay work-span while the BMS reading is fresh — a stale value
+    // after a mid-mow BLE drop must not hold a session open and overcount.
+    working = (state == ActivityState::Working) && (millis() - bms.lastAnalogMs < BMS_STALE_MS);
   }
+  trackWorkSession(working);
   if (now - lastHoursSaveMs >= RUNTIME_SAVE_MS) saveHours();
 }
 
@@ -4889,7 +5057,7 @@ void apiBatteryOff() {
   server.sendHeader("Connection", "close");
   server.send(200, "application/json", "{\"ok\":true,\"note\":\"Cutting battery power\"}");
   delay(300);
-  saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
+  saveSettings(); saveHours(); saveMaintenance(); saveDegradation(); saveWorkSessions();
   triggerBatteryOff();
 }
 
@@ -5206,6 +5374,7 @@ void setupRoutes() {
   server.on("/api/heatmap", HTTP_GET, apiHeatmapGet);
   server.on("/api/heatmap/export.csv", HTTP_GET, apiHeatmapExport);
   server.on("/api/pay", HTTP_GET,    apiPayGet);
+  server.on("/api/pay/day", HTTP_GET, apiPayDayGet);
   server.on("/api/pay", HTTP_POST,   guarded(apiPayPost));
   server.on("/api/pay", HTTP_DELETE, guarded(apiPayDelete));
   server.on("/api/pay/confirm", HTTP_POST,   guarded(apiPayConfirm));
@@ -5279,6 +5448,7 @@ void setup() {
   loadDegradation();
   loadMaintenance();
   loadPayRecords();
+  loadWorkSessions();
   loadMachineInfo();
   initDefaultMaintenanceItems();
   loadBmsCache();

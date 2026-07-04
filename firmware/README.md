@@ -11,13 +11,13 @@ The merged binary below is for manual or recovery flashing. It is the latest
 release for the Waveshare ESP32-S3-Touch-LCD-1.85 (and 1.85C variant).
 
 ```text
-firmware/R48Display-v0.3.6-merged.bin
+firmware/R48Display-v0.3.7-merged.bin
 ```
 
 Flash at offset `0x0` — includes bootloader, partition table, and app:
 
 ```sh
-esptool.py --chip esp32s3 --baud 460800 write_flash 0x0 R48Display-v0.3.6-merged.bin
+esptool.py --chip esp32s3 --baud 460800 write_flash 0x0 R48Display-v0.3.7-merged.bin
 ```
 
 Or use the [ESP32 Flash Download Tool](https://www.espressif.com/en/support/download/other-tools) — select the merged bin, set offset to `0x0`.

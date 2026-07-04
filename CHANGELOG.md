@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.3.7](docs/releases/v0.3.7.md) | Precise pay timekeeping (per-session log); split/back-date correction tool; live current-day hours. |
 | [v0.3.6](docs/releases/v0.3.6.md) | One-click web USB installer; device self-updates over Wi-Fi from GitHub releases. |
 | [v0.3.5](docs/releases/v0.3.5.md) | Pay Records; Maintenance-page crash fix; web-UI security hardening. |
 | [v0.3.4](docs/releases/v0.3.4.md) | Weather display + 7-day forecast; ESP32-S3-Touch-LCD-1.85C support. |
