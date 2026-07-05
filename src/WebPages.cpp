@@ -145,8 +145,8 @@ String batteryBody() {
       "</section>");
 }
 
-String settingsBody() {
-  return F(
+PGM_P settingsBody() {
+  return PSTR(
       "<section class='grid'>"
       "<form class='card wide' id='settings-form'>"
       "<div class='section-head'><h2>Settings</h2><button class='primary'>Save</button></div>"
@@ -407,8 +407,8 @@ String settingsBody() {
       "</section>");
 }
 
-String maintenanceBody() {
-  return F(
+PGM_P maintenanceBody() {
+  return PSTR(
       // Activity heatmap
       "<section class='card wide' id='heatmap-card' style='display:none'>"
       "<div class='section-head'>"
@@ -610,8 +610,8 @@ String updateBody() {
       "</section>");
 }
 
-String appScript() {
-  return F(R"JS(
+PGM_P appScript() {
+  return PSTR(R"JS(
 const $ = (id) => document.getElementById(id);
 const qsa = (sel) => Array.from(document.querySelectorAll(sel));
 let themeOptions = [];
@@ -1272,7 +1272,7 @@ function watchForReboot() {
 
 if ($('dash-soc') || $('bat-soc-gauge') || $('details')) {
   refresh();
-  setInterval(refresh, 2500);
+  setInterval(refresh, 5000);
 }
 if ($('wx-forecast')) {
   refreshWeather();
@@ -1583,7 +1583,7 @@ async function saveMachineInfo(ev) {
 }
 
 async function loadMaintHours() {
-  const data = await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()).catch(()=>null);
+  const data = await fetch('/api/hours',{cache:'no-store'}).then(r=>r.json()).catch(()=>null);
   const h = data?.hours || {};
   const baseline = parseFloat(h.baseline)||0;
   const counted = parseFloat(h.counted)||0;
@@ -1848,7 +1848,18 @@ async function initHeatmap() {
   if (!raw) return;
   _hmData = raw;
   _hmYear = raw.cur_year;
-  _hmMaint = raw.maintenance || {};
+  _hmMaint = {};
+  if (Array.isArray(raw.maintenance)) {
+    raw.maintenance.forEach(m => {
+      if (!Array.isArray(m) || m.length < 2) return;
+      const day = String(m[0] || '');
+      const name = String(m[1] || '');
+      if (!day || !name) return;
+      (_hmMaint[day] = _hmMaint[day] || []).push(name);
+    });
+  } else {
+    _hmMaint = raw.maintenance || {};
+  }
   if (!raw.maintenance) {
   // Build maint-by-date index from all history
   const items = _maintItems.length ? _maintItems

@@ -2660,19 +2660,6 @@ void apiHeatmapGet() {
   if (!getLocalTime(&ti, 50)) { server.send(503, "application/json", F("{\"error\":\"no_time\"}")); return; }
   const int curYear = ti.tm_year + 1900;
   const int curYday = ti.tm_yday;
-  std::map<String, std::vector<String>> maintByDate;
-  for (const auto &item : maintenanceItems) {
-    loadMaintenanceHistoryFor(item.id);
-    const auto hit = maintHistory.find(item.id);
-    if (hit == maintHistory.end()) continue;
-    for (const auto &e : hit->second) {
-      if (!e.ts) continue;
-      time_t t = static_cast<time_t>(e.ts);
-      struct tm tm; char ds[12] = "";
-      if (localtime_r(&t, &tm)) strftime(ds, sizeof(ds), "%Y-%m-%d", &tm);
-      if (ds[0]) maintByDate[String(ds)].push_back(item.name);
-    }
-  }
   // Collect years that have data plus the current year
   std::vector<int> years;
   {
@@ -2750,23 +2737,30 @@ void apiHeatmapGet() {
     }
     server.sendContent("]");
   }
-  server.sendContent(F("},\"maintenance\":{"));
-  bool firstDate = true;
-  for (const auto &kv : maintByDate) {
-    if (!firstDate) server.sendContent(",");
-    firstDate = false;
-    server.sendContent("\"");
-    server.sendContent(jsonEscape(kv.first));
-    server.sendContent("\":[");
-    for (size_t i = 0; i < kv.second.size(); i++) {
-      if (i) server.sendContent(",");
-      server.sendContent("\"");
-      server.sendContent(jsonEscape(kv.second[i]));
-      server.sendContent("\"");
+  server.sendContent(F("},\"maintenance\":["));
+  bool firstMaint = true;
+  for (const auto &item : maintenanceItems) {
+    loadMaintenanceHistoryFor(item.id);
+    const auto hit = maintHistory.find(item.id);
+    if (hit == maintHistory.end()) continue;
+    for (const auto &e : hit->second) {
+      if (!e.ts) continue;
+      time_t t = static_cast<time_t>(e.ts);
+      struct tm tm;
+      char ds[12] = "";
+      if (localtime_r(&t, &tm)) strftime(ds, sizeof(ds), "%Y-%m-%d", &tm);
+      if (!ds[0]) continue;
+      if (!firstMaint) server.sendContent(",");
+      firstMaint = false;
+      server.sendContent(F("[\""));
+      server.sendContent(ds);
+      server.sendContent(F("\",\""));
+      server.sendContent(jsonEscape(item.name));
+      server.sendContent(F("\"]"));
     }
-    server.sendContent("]");
+    yield();
   }
-  server.sendContent("}}");
+  server.sendContent("]}");
 }
 
 void apiHeatmapExport() {
@@ -4452,7 +4446,9 @@ String commonHead(const String &title) {
 }
 
 String commonFoot() {
-  String html = F("</main><script src='/app.js'></script></body></html>");
+  String html = F("</main><script src='/app.js?v=");
+  html += FIRMWARE_VERSION;
+  html += F("'></script></body></html>");
   return html;
 }
 
@@ -4514,6 +4510,19 @@ void sendPage(const String &title, String (*body)()) {
   server.send(200, "text/html", "");
   sendContentPieces(head);
   sendContentPieces(bodyHtml);
+  sendContentPieces(foot);
+}
+
+void sendPageP(const String &title, PGM_P body) {
+  lastWebRequestMs = millis();
+  String head = commonHead(title);
+  String foot = commonFoot();
+  const size_t bodyLen = strlen_P(body);
+  server.sendHeader("Connection", "close");
+  server.setContentLength(head.length() + bodyLen + foot.length());
+  server.send(200, "text/html", "");
+  sendContentPieces(head);
+  server.sendContent_P(body, bodyLen);
   sendContentPieces(foot);
 }
 
@@ -4789,6 +4798,25 @@ void apiStatus() {
   lastWebRequestMs = millis();
   JsonDocument doc;
   addStatusJson(doc);
+  sendJson(doc);
+}
+
+void apiHoursGet() {
+  lastWebRequestMs = millis();
+  JsonDocument doc;
+  JsonObject vehicle = doc["vehicle"].to<JsonObject>();
+  vehicle["standby_label"] = settings.labelStandby;
+  vehicle["active_label"] = settings.labelActive;
+  vehicle["work_label"] = settings.labelWorking;
+  JsonObject hours = doc["hours"].to<JsonObject>();
+  hours["baseline"] = serialized(String(settings.hoursBaseline, 2));
+  hours["counted"] = serialized(String(hoursTotal, 2));
+  hours["total"] = serialized(String(settings.hoursBaseline + hoursTotal, 2));
+  hours["standby"] = serialized(String(hoursStandby, 2));
+  hours["active"] = serialized(String(hoursActive, 2));
+  hours["working"] = serialized(String(hoursWorking, 2));
+  hours["counting"] = hoursPauseReason[0] == '\0';
+  hours["pause_reason"] = hoursPauseReason;
   sendJson(doc);
 }
 
@@ -5245,7 +5273,11 @@ static String fwUpdConnectionError(const char *host, int code) {
       err = "TCP to " + ip.toString() + ":443 failed";
     } else {
       probe.stop();
-      err = "TLS handshake failed, free heap " + String(ESP.getFreeHeap());
+      // Report the largest contiguous INTERNAL block, not just total free: TLS
+      // needs a contiguous chunk, so a big free heap with a small largest block
+      // (fragmentation) is the real failure mode to distinguish here.
+      err = "TLS setup failed, free " + String(ESP.getFreeHeap()) +
+            " / largest-internal " + String(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     }
   }
   err += " [" + String(HTTPClient::errorToString(code)) + "]";
@@ -5290,56 +5322,11 @@ static bool fwUpdFetchInstallerIndex(std::vector<String> &tags, String &errOut) 
   return true;
 }
 
-static bool fwUpdFetchGitHubApi(std::vector<String> &tags, String &errOut) {
-  if (WiFi.status() != WL_CONNECTED) { errOut = "Wi-Fi not connected"; return false; }
-  WiFiClientSecure client;
-  client.setInsecure();  // integrity comes from the OTA image validation, not the cert
-  client.setHandshakeTimeout(20);
-  HTTPClient http;
-  http.setConnectTimeout(10000);
-  http.setTimeout(12000);
-  http.setReuse(false);
-  http.useHTTP10(true);  // avoid chunked transfer-encoding so the stream parses cleanly
-  const String url = "https://api.github.com/repos/" + String(kUpdateRepo) + "/releases?per_page=15";
-  if (!http.begin(client, url)) { errOut = "HTTP begin failed"; return false; }
-  // Headers must be added AFTER begin() — added before, they can be dropped,
-  // and GitHub's API rejects requests without a User-Agent.
-  http.addHeader("User-Agent", "R48Display");
-  http.addHeader("Accept", "application/vnd.github+json");
-  const int code = http.GET();
-  if (code != 200) {
-    http.end();
-    if (code > 0) {
-      errOut = "GitHub HTTP " + String(code);
-    } else {
-      errOut = fwUpdConnectionError("api.github.com", code);
-    }
-    return false;
-  }
-  JsonDocument filter; filter[0]["tag_name"] = true;    // stream-parse only each tag
-  JsonDocument doc;
-  const DeserializationError err =
-      deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
-  http.end();
-  if (err) { errOut = "release list parse failed"; return false; }
-  tags.clear();
-  for (JsonObject o : doc.as<JsonArray>()) {
-    const String t = String(o["tag_name"] | "");
-    if (t.length()) tags.push_back(t);
-  }
-  if (tags.empty()) { errOut = "no releases returned"; return false; }
-  return true;  // GitHub returns releases newest-first
-}
-
+// Single source: the installer's versions.json on GitHub Pages. It's the same
+// list the web installer uses, it's small, and it's on our own site — so there
+// is one TLS path to make reliable rather than two that fail the same way.
 static bool fwUpdFetchReleases(std::vector<String> &tags, String &errOut) {
-  String indexErr;
-  if (fwUpdFetchInstallerIndex(tags, indexErr)) return true;
-
-  String apiErr;
-  if (fwUpdFetchGitHubApi(tags, apiErr)) return true;
-
-  errOut = "installer index: " + indexErr + "; GitHub API: " + apiErr;
-  return false;
+  return fwUpdFetchInstallerIndex(tags, errOut);
 }
 
 static void fwUpdDoCheck(bool bleFallback) {
@@ -5589,14 +5576,18 @@ void setupRoutes() {
   server.collectHeaders(collectedHeaders, 1);
   server.on("/", HTTP_GET, []() { sendPage("Dashboard", R48Web::dashboardBody); });
   server.on("/battery", HTTP_GET, []() { sendPage("Battery", R48Web::batteryBody); });
-  server.on("/maintenance", HTTP_GET, []() { sendPage("Maintenance", R48Web::maintenanceBody); });
-  server.on("/settings", HTTP_GET, []() { sendPage("Settings", R48Web::settingsBody); });
+  server.on("/maintenance", HTTP_GET, []() { sendPageP("Maintenance", R48Web::maintenanceBody()); });
+  server.on("/settings", HTTP_GET, []() { sendPageP("Settings", R48Web::settingsBody()); });
   server.on("/status", HTTP_GET, []() { server.sendHeader("Location", "/", true); server.send(302, "text/plain", ""); });
   server.on("/update", HTTP_GET, []() { server.sendHeader("Location", "/settings"); server.send(302); });
   server.on("/update", HTTP_POST, handleUpdatePostDone, handleUpdateUpload);
   server.on("/theme.css", HTTP_GET, []() { server.send(200, "text/css", themeCss()); });
-  server.on("/app.js", HTTP_GET, []() { server.send(200, "application/javascript", R48Web::appScript()); });
+  server.on("/app.js", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send_P(200, PSTR("application/javascript"), R48Web::appScript());
+  });
   server.on("/api/status", HTTP_GET, apiStatus);
+  server.on("/api/hours", HTTP_GET, apiHoursGet);
   server.on("/api/settings", HTTP_GET, apiSettingsGet);
   server.on("/api/settings", HTTP_POST, guarded(apiSettingsPost));
   server.on("/api/bms/profiles", HTTP_GET, apiBmsProfiles);

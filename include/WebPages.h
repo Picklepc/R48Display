@@ -6,10 +6,9 @@ namespace R48Web {
 
 String dashboardBody();
 String batteryBody();
-String maintenanceBody();
-String settingsBody();
+PGM_P maintenanceBody();
+PGM_P settingsBody();
 String updateBody();
-String appScript();
+PGM_P appScript();
 
 }  // namespace R48Web
-
