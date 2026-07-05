@@ -491,6 +491,7 @@ static int      hdaySnapYday = -1;
 static int      hdaySnapYear = 0;
 uint32_t lastHoursTickMs = 0;
 uint32_t lastHoursSaveMs = 0;
+const char *hoursPauseReason = "starting";  // why hour counting is paused ("" = counting)
 bool previousCharging = false;
 String lastButtonAction;
 uint32_t lastButtonActionMs = 0;
@@ -2564,6 +2565,7 @@ static void saveHdaySnapshot() {
 }
 
 static void saveHdayRecord(int year, int yday, float sta, float act, float wrk) {
+  if (year < 2020 || year > 2099) return;  // clock-glitch guard: never write junk-year blobs
   const int days = daysInYear(year);
   if (yday < 0 || yday >= days) return;
   Preferences p;
@@ -2591,6 +2593,7 @@ void checkHdayRollover() {
   if (!getLocalTime(&ti, 0)) return;
   const int nowYear = ti.tm_year + 1900;
   const int nowYday = ti.tm_yday;
+  if (nowYear < 2020 || nowYear > 2099) return;  // don't roll over on a bogus clock
   if (hdaySnapYday < 0) {
     // First valid time read — seed snapshot without writing a record
     hdaySnapSta  = hoursStandby;
@@ -3975,19 +3978,28 @@ void updateHours() {
   const float deltaH = (now - lastHoursTickMs) / 3600000.0f;
   lastHoursTickMs = now;
   const bool boardBatteryOk = !screenBattery.present || screenBattery.percent >= settings.boardBatteryLowPct;
+  const bool bmsFresh = bms.lastAnalogMs > 0 && (now - bms.lastAnalogMs) < BMS_STALE_MS;
+  // Surface WHY counting is paused so a short day total is diagnosable from
+  // /api/status instead of silently under-counting (e.g. 2 h mowed, 0.4 h shown).
+  if (bms.lastAnalogMs == 0)  hoursPauseReason = "waiting for first BMS reading";
+  else if (!boardBatteryOk)   hoursPauseReason = "board battery below threshold";
+  else if (!bmsFresh)         hoursPauseReason = "BMS data stale (BLE dropped)";
+  else                        hoursPauseReason = "";
   bool working = false;
   if (bms.lastAnalogMs > 0 && boardBatteryOk) {
     hoursTotal += deltaH;
-    const ActivityState state = activityState();
-    switch (state) {
-      case ActivityState::Working:  hoursActive += deltaH; hoursWorking += deltaH; sessionActiveHours += deltaH; break;
-      case ActivityState::Active:   hoursActive += deltaH;  sessionActiveHours += deltaH; break;
-      case ActivityState::Charging: /* charging time in total only */                      break;
-      default:                      hoursStandby += deltaH;                                break;
+    // State hours only accrue from a FRESH reading: a stale frozen current
+    // must not keep counting a state (working/standby) the machine left.
+    if (bmsFresh) {
+      const ActivityState state = activityState();
+      switch (state) {
+        case ActivityState::Working:  hoursActive += deltaH; hoursWorking += deltaH; sessionActiveHours += deltaH; break;
+        case ActivityState::Active:   hoursActive += deltaH;  sessionActiveHours += deltaH; break;
+        case ActivityState::Charging: /* charging time in total only */                      break;
+        default:                      hoursStandby += deltaH;                                break;
+      }
+      working = (state == ActivityState::Working);
     }
-    // Only log a pay work-span while the BMS reading is fresh — a stale value
-    // after a mid-mow BLE drop must not hold a session open and overcount.
-    working = (state == ActivityState::Working) && (millis() - bms.lastAnalogMs < BMS_STALE_MS);
   }
   trackWorkSession(working);
   if (now - lastHoursSaveMs >= RUNTIME_SAVE_MS) saveHours();
@@ -4515,6 +4527,8 @@ void addStatusJson(JsonDocument &doc) {
   hours["active"] = serialized(String(hoursActive, 2));
   hours["working"] = serialized(String(hoursWorking, 2));
   hours["session_active"] = serialized(String(sessionActiveHours, 2));
+  hours["counting"] = hoursPauseReason[0] == '\0';
+  hours["pause_reason"] = hoursPauseReason;
 
   // Keep mower object for backward compatibility with any existing consumers
   JsonObject mower = doc["mower"].to<JsonObject>();

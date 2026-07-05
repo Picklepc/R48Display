@@ -1176,13 +1176,18 @@ function renderUpdateStatus(s) {
     install.style.display = (s.available && !busy) ? '' : 'none';
     if (s.available) install.textContent = `Install v${s.latest}`;
   }
+  // Version picker lists v0.3.6+ only (older builds predate the self-updater).
+  const selTags = (Array.isArray(s.tags) ? s.tags : []).filter(t => {
+    const p = String(t).replace(/^v/,'').split('.').map(n => parseInt(n) || 0);
+    return (p[0]*10000 + p[1]*100 + (p[2]||0)) >= 306;
+  });
   const pick = $('fwupd-pick'), sel = $('fwupd-version');
-  if (pick && sel && Array.isArray(s.tags) && s.tags.length) {
+  if (pick && sel && selTags.length) {
     pick.style.display = '';
-    if (sel.dataset.filled !== String(s.tags.length)) {
-      sel.innerHTML = s.tags.map(t => { const v = String(t).replace(/^v/,'');
+    if (sel.dataset.filled !== String(selTags.length)) {
+      sel.innerHTML = selTags.map(t => { const v = String(t).replace(/^v/,'');
         return `<option value="${escAttr(v)}">${escAttr(t)}${v===s.current?' (installed)':''}</option>`; }).join('');
-      sel.dataset.filled = String(s.tags.length);
+      sel.dataset.filled = String(selTags.length);
     }
   }
   if (status) {
@@ -1812,16 +1817,17 @@ async function initHeatmap() {
   _hmData = raw;
   _hmYear = raw.cur_year;
   // Build maint-by-date index from all history
-  const items = await fetch('/api/maintenance', {cache:'no-store'}).then(r => r.json()).catch(() => []);
-  await Promise.all(items.map(async it => {
+  const items = _maintItems.length ? _maintItems
+    : await fetch('/api/maintenance', {cache:'no-store'}).then(r => r.json()).catch(() => []);
+  for (const it of items) {  // one at a time — don't flood the single-threaded server
     const h = await fetch('/api/maintenance/history?id='+it.id, {cache:'no-store'}).then(r => r.json()).catch(() => null);
-    if (!h || !h.entries) return;
+    if (!h || !h.entries) continue;
     for (const e of h.entries) {
       if (!e.ts) continue;
       const key = _ymd(new Date(e.ts * 1000));
       (_hmMaint[key] = _hmMaint[key] || []).push(it.name);
     }
-  }));
+  }
   card.style.display = '';
   renderHeatmap();
 }
@@ -1918,12 +1924,16 @@ function hmTipShow(e) {
 function hmTipHide() { const t=$('hm-tip'); if(t) t.style.display='none'; }
 
 if ($('maint-list')) {
-  loadMachineInfo();
   $('machine-form')?.addEventListener('submit', saveMachineInfo);
-  loadMaintHours();
-  loadMaintenance();
-  loadPay();
-  initHeatmap();
+  // Sequential, not parallel: a burst of concurrent fetches can exhaust the
+  // synchronous ESP32 web server's connections and wedge it until power-cycle.
+  (async () => {
+    await loadMaintenance();
+    await loadPay();
+    await loadMachineInfo();
+    await loadMaintHours();
+    await initHeatmap();
+  })();
 }
 if ($('dash-pay-wrap')) loadPayStats();
 )JS");

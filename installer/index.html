@@ -56,10 +56,14 @@
     </div>
 
     <div class="card cta">
-      <esp-web-install-button manifest="./manifest.json">
+      <esp-web-install-button id="installBtn" manifest="./manifest.json">
         <button slot="activate" class="link" style="background:var(--primary);border-color:var(--primary);font-weight:600;font-size:16px;padding:13px 26px">Install R48Display</button>
       </esp-web-install-button>
       <p class="unsupported">Your browser can't flash over USB. Open this page in <b>Google Chrome</b> or <b>Microsoft Edge</b> on a desktop computer.</p>
+      <p style="margin:16px 0 0;font-size:13px;color:var(--muted)">
+        Version
+        <select id="verSel" style="background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px 10px;font:inherit;margin-left:6px"></select>
+      </p>
       <p class="ver" id="ver">&nbsp;</p>
     </div>
 
@@ -76,10 +80,28 @@
 
   <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
   <script>
-    fetch('./manifest.json', { cache: 'no-store' })
+    const sel = document.getElementById('verSel');
+    const btn = document.getElementById('installBtn');
+    const ver = document.getElementById('ver');
+    function setVer(tag, latest) {
+      btn.setAttribute('manifest', latest ? './manifest.json' : './manifest-' + tag + '.json');
+      ver.textContent = 'Firmware version ' + tag.replace(/^v/, '') + (latest ? ' (latest)' : '');
+    }
+    fetch('./versions.json', { cache: 'no-store' })
       .then(r => r.json())
-      .then(m => { document.getElementById('ver').textContent = 'Firmware version ' + m.version; })
-      .catch(() => {});
+      .then(d => {
+        const vs = d.versions || [];
+        if (!vs.length) throw 0;
+        sel.innerHTML = vs.map((x, i) =>
+          '<option value="' + x.tag + '">' + x.tag + (i === 0 ? ' (latest)' : '') + '</option>').join('');
+        sel.onchange = () => setVer(sel.value, sel.selectedIndex === 0);
+        setVer(vs[0].tag, true);
+      })
+      .catch(() => {  // fallback: latest-only manifest
+        sel.parentElement.style.display = 'none';
+        fetch('./manifest.json', { cache: 'no-store' }).then(r => r.json())
+          .then(m => { ver.textContent = 'Firmware version ' + m.version; }).catch(() => {});
+      });
   </script>
 </body>
 </html>

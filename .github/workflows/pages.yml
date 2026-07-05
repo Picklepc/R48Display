@@ -46,18 +46,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assemble installer from latest release
+      - name: Assemble installer from releases (v0.3.6+)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
-          VER=${TAG#v}
-          echo "Latest release: $TAG (version $VER)"
-          mkdir -p _site
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'firmware-merged.bin' --output _site/firmware.bin
+          mkdir -p _site/bin
           cp installer/index.html _site/index.html
-          cat > _site/manifest.json <<EOF
+          TAGS=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=12" --jq '.[].tag_name')
+          LIST=""
+          for TAG in $TAGS; do
+            # installer offers v0.3.6 and newer only
+            [ "$(printf '%s\n' "$TAG" v0.3.6 | sort -V | head -1)" = "v0.3.6" ] || continue
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'firmware-merged.bin' --output "_site/bin/${TAG}.bin" || continue
+            VER=${TAG#v}
+            cat > "_site/manifest-${TAG}.json" <<EOF
           {
             "name": "R48Display",
             "version": "${VER}",
@@ -66,13 +69,20 @@ jobs:
               {
                 "chipFamily": "ESP32-S3",
                 "parts": [
-                  { "path": "firmware.bin", "offset": 0 }
+                  { "path": "bin/${TAG}.bin", "offset": 0 }
                 ]
               }
             ]
           }
           EOF
-          echo "Assembled installer for $TAG ($(du -h _site/firmware.bin | cut -f1))"
+            LIST="${LIST}{\"tag\":\"${TAG}\",\"version\":\"${VER}\"},"
+          done
+          echo "{\"versions\":[${LIST%,}]}" > _site/versions.json
+          LATEST=$(echo "$TAGS" | head -1)
+          cp "_site/bin/${LATEST}.bin" _site/firmware.bin
+          cp "_site/manifest-${LATEST}.json" _site/manifest.json
+          echo "Assembled: $(cat _site/versions.json)"
+          ls -la _site/bin
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
