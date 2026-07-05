@@ -4534,7 +4534,10 @@ void sendJson(JsonDocument &doc) {
   server.send(200, "application/json", out);
 }
 
-void addStatusJson(JsonDocument &doc) {
+// full=false builds the compact "live" payload for the dashboard's recurring
+// poll: it omits the heavy, rarely-changing objects (theme, usage, and the
+// duplicate mower block) that the details table only needs once per page load.
+void addStatusJson(JsonDocument &doc, bool full = true) {
   doc["firmware"] = FIRMWARE_VERSION;
   doc["project"] = PROJECT_NAME;
   doc["uptime_ms"] = millis();
@@ -4558,23 +4561,25 @@ void addStatusJson(JsonDocument &doc) {
 
   const UsageCategory &usage = activeUsage();
   const ThemeProfile &theme = activeTheme();
-  JsonObject themeJson = doc["theme"].to<JsonObject>();
-  themeJson["id"] = theme.id;
-  themeJson["label"] = theme.label;
-  themeJson["family"] = theme.family;
-  themeJson["description"] = theme.description;
-  themeJson["primary"] = cssColor(theme.primary);
-  themeJson["accent"] = cssColor(theme.accent);
+  if (full) {
+    JsonObject themeJson = doc["theme"].to<JsonObject>();
+    themeJson["id"] = theme.id;
+    themeJson["label"] = theme.label;
+    themeJson["family"] = theme.family;
+    themeJson["description"] = theme.description;
+    themeJson["primary"] = cssColor(theme.primary);
+    themeJson["accent"] = cssColor(theme.accent);
 
-  JsonObject usageJson = doc["usage"].to<JsonObject>();
-  usageJson["category"] = settings.usageCategory;
-  usageJson["label"] = usage.label;
-  usageJson["default_theme"] = usage.defaultThemeId;
-  usageJson["active_label"] = usage.activeLabel;
-  usageJson["work_label"] = usage.workLabel;
-  usageJson["activity_detection"] = settings.activityDetection;
-  usageJson["work_detection"] = settings.workDetection;
-  usageJson["audio_assist_available"] = usage.audioAssist;
+    JsonObject usageJson = doc["usage"].to<JsonObject>();
+    usageJson["category"] = settings.usageCategory;
+    usageJson["label"] = usage.label;
+    usageJson["default_theme"] = usage.defaultThemeId;
+    usageJson["active_label"] = usage.activeLabel;
+    usageJson["work_label"] = usage.workLabel;
+    usageJson["activity_detection"] = settings.activityDetection;
+    usageJson["work_detection"] = settings.workDetection;
+    usageJson["audio_assist_available"] = usage.audioAssist;
+  }
 
   const ActivityState aState = activityState();
   JsonObject vehicle = doc["vehicle"].to<JsonObject>();
@@ -4617,6 +4622,7 @@ void addStatusJson(JsonDocument &doc) {
   hours["pause_reason"] = hoursPauseReason;
 
   // Keep mower object for backward compatibility with any existing consumers
+  if (full) {
   JsonObject mower = doc["mower"].to<JsonObject>();
   mower["model"] = settings.mowerModel;
   mower["mode"] = mowerModeLabel();
@@ -4635,6 +4641,7 @@ void addStatusJson(JsonDocument &doc) {
   mower["runtime_estimate_hours"] = serialized(String(runtimeEstimateHours(), 2));
   mower["charge_estimate_hours"] = serialized(String(chargeEstimateHours(), 2));
   mower["health_percent_estimate"] = serialized(String(bmsHealthPercent(), 1));
+  }
 
   JsonObject b = doc["bms"].to<JsonObject>();
   b["target_name"] = settings.bmsName;
@@ -4798,6 +4805,15 @@ void apiStatus() {
   lastWebRequestMs = millis();
   JsonDocument doc;
   addStatusJson(doc);
+  sendJson(doc);
+}
+
+// Compact live telemetry for the dashboard's recurring poll (theme/usage/mower
+// omitted). The full /api/status is fetched once per page load for the rest.
+void apiLiveGet() {
+  lastWebRequestMs = millis();
+  JsonDocument doc;
+  addStatusJson(doc, false);
   sendJson(doc);
 }
 
@@ -5584,6 +5600,7 @@ void setupRoutes() {
     server.send_P(200, PSTR("application/javascript"), R48Web::appScript());
   });
   server.on("/api/status", HTTP_GET, apiStatus);
+  server.on("/api/live", HTTP_GET, apiLiveGet);
   server.on("/api/hours", HTTP_GET, apiHoursGet);
   server.on("/api/settings", HTTP_GET, apiSettingsGet);
   server.on("/api/settings", HTTP_POST, guarded(apiSettingsPost));

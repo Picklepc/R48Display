@@ -500,3 +500,22 @@ These are desirable but explicitly out of scope for the initial stable release.
 - [ ] GPS/IMU optional feature promotion (separate branch)
 - [ ] SD card trip log optional feature promotion (separate branch)
 - [ ] GitHub Actions CI (build + static analysis on PR)
+
+---
+
+## Milestone 0.5.x — arduino-esp32 3.x migration (enables on-device TLS updates)
+
+**Why:** on-device GitHub update check/download is memory-bound on arduino-esp32
+2.0.17 — mbedTLS needs two large contiguous internal blocks the device can't
+provide alongside Wi-Fi + BLE + LVGL, and the framework's TLS buffers can't be
+shrunk from the app. arduino-esp32 3.x exposes `WiFiClientSecure::setBufferSizes()`,
+letting us cap the TLS buffers to fit. This is the payoff of the migration.
+
+- [ ] **M5.0-01** Bump `platform` in `platformio.ini` to a build providing arduino-esp32 3.x (IDF 5.x); confirm `waveshare_esp32_s3_touch_lcd_1_85` board + OPI PSRAM (`qio_opi`) support.
+- [ ] **M5.0-02** Triage build breaks (2.x→3.x API): WiFi/WiFiClientSecure, HTTPClient/HTTPUpdate/Update, WebServer, Preferences, `analogSetPinAttenuation`, `heap_caps_malloc_extmem_enable`, ArduinoOTA, ledc.
+- [ ] **M5.0-03** Confirm library compat on the new core: NimBLE-Arduino 2.5.0, LVGL 8.4.0, GFX 1.6.0, PubSubClient, ArduinoJson 7.
+- [ ] **M5.0-04** Confirm OTA rollback still works: the `verifyRollbackLater()` weak-hook + `esp_ota_mark_app_valid_cancel_rollback()` path must still exist in the 3.x core (verify in `esp32-hal-misc.c`); confirm `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`.
+- [ ] **M5.0-05** THE PAYOFF: add `client.setBufferSizes(rx, tx)` (small rx, ~4–8 KB) to the update check (`fwUpdFetchInstallerIndex`) and the `httpUpdate` download; restore the BLE-free path if still helpful; re-verify on hardware that the check + version picker + self-update actually succeed. Capture free-heap/largest-block before & after.
+- [ ] **M5.0-06** Feature-retention checklist on hardware: LVGL pages + touch nav, BMS BLE for all profiles, MQTT/HA discovery, weather, maintenance/pay/heatmap, multi-tier hours + pause reasons, power-save/shutdown (GPIO 6/7), wrong-file upload guard, web installer USB flash.
+- [ ] **M5.0-07** Bootloader/partition: 3.x ships an IDF 5.x bootloader. OTA replaces only the app slot, NOT the bootloader — so the FIRST 3.x install should be a USB merged flash (bootloader+partitions+app). Test whether a 2.x→3.x OTA boots (it's rollback-protected, so safe to try); document the required path. Partition **table** is unchanged (ours, in `partitions.csv`), so no repartition.
+- [ ] **M5.0-08** Regression pass; cut as v0.5.0 with clear "USB flash required to move to 0.5.x" upgrade note if M5.0-07 shows OTA can't cross the bootloader gap.

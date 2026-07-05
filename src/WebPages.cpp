@@ -881,13 +881,25 @@ function render(data) {
   text('sys-heap', (() => { const h = Number(get(data, 'hardware.free_heap', 0)); return h > 0 ? `${Math.round(h / 1024)} KB` : '--'; })());
   text('sys-mqtt', get(data, 'mqtt.status') || (get(data, 'mqtt.enabled') ? 'enabled' : 'disabled'));
   text('sys-ble-pol', `${get(data, 'bms.policy') || '--'}`);
-  renderDetails(data);
 }
 
+// Recurring poll: compact live telemetry only (theme/usage/mower omitted).
 async function refresh() {
   try {
-    const res = await fetch('/api/status', {cache: 'no-store'});
+    const res = await fetch('/api/live', {cache: 'no-store'});
     render(await res.json());
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
+// Once per page load: full status + the static details/config table.
+async function refreshFull() {
+  try {
+    const res = await fetch('/api/status', {cache: 'no-store'});
+    const data = await res.json();
+    render(data);
+    renderDetails(data);
   } catch (err) {
     console.warn(err);
   }
@@ -1127,7 +1139,7 @@ function wireActions() {
     }
     refreshThemeCss();
     await loadSettings();
-    await refresh();
+    await refreshFull();
   });
 }
 
@@ -1271,8 +1283,8 @@ function watchForReboot() {
 }
 
 if ($('dash-soc') || $('bat-soc-gauge') || $('details')) {
-  refresh();
-  setInterval(refresh, 5000);
+  refreshFull();               // full status once (incl. the static details table)
+  setInterval(refresh, 5000);  // then compact live telemetry only
 }
 if ($('wx-forecast')) {
   refreshWeather();
