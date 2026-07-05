@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.4.3](docs/releases/v0.4.3.md) | Update-check fix (dropped User-Agent header) + staged failure diagnostics (DNS/TCP/TLS/HTTP). |
 | [v0.4.2](docs/releases/v0.4.2.md) | Maintenance page no longer wedges the web server; hour-counting pauses made visible & stale-proof; version pickers in installer + settings. |
 | [v0.4.1](docs/releases/v0.4.1.md) | Update check falls back to freeing Bluetooth for the TLS handshake, fixing "could not reach GitHub" on memory-tight devices. |
 | [v0.4.0](docs/releases/v0.4.0.md) | OTA auto-rollback on bad boot; wrong-file upload guard; version picker to install/roll back to any release. |

@@ -5132,32 +5132,58 @@ static bool versionIsNewer(const String &candidate, const String &base) {
   return cc > bc;
 }
 
-static bool fwUpdFetchReleases(std::vector<String> &tags) {
-  if (WiFi.status() != WL_CONNECTED) return false;
+static bool fwUpdFetchReleases(std::vector<String> &tags, String &errOut) {
+  if (WiFi.status() != WL_CONNECTED) { errOut = "Wi-Fi not connected"; return false; }
   WiFiClientSecure client;
   client.setInsecure();  // integrity comes from the OTA image validation, not the cert
+  client.setHandshakeTimeout(20);
   HTTPClient http;
+  http.setConnectTimeout(10000);
   http.setTimeout(12000);
   http.setReuse(false);
   http.useHTTP10(true);  // avoid chunked transfer-encoding so the stream parses cleanly
-  http.addHeader("User-Agent", "R48Display");           // GitHub API rejects UA-less requests
-  http.addHeader("Accept", "application/vnd.github+json");
   const String url = "https://api.github.com/repos/" + String(kUpdateRepo) + "/releases?per_page=15";
-  if (!http.begin(client, url)) return false;
+  if (!http.begin(client, url)) { errOut = "HTTP begin failed"; return false; }
+  // Headers must be added AFTER begin() — added before, they can be dropped,
+  // and GitHub's API rejects requests without a User-Agent.
+  http.addHeader("User-Agent", "R48Display");
+  http.addHeader("Accept", "application/vnd.github+json");
   const int code = http.GET();
-  if (code != 200) { http.end(); return false; }
+  if (code != 200) {
+    http.end();
+    if (code > 0) {
+      errOut = "GitHub HTTP " + String(code);
+    } else {
+      // Connection-level failure: probe each stage so the UI names the culprit.
+      IPAddress ip;
+      if (!WiFi.hostByName("api.github.com", ip)) {
+        errOut = "DNS lookup failed";
+      } else {
+        WiFiClient probe;
+        if (!probe.connect(ip, 443, 6000)) {
+          errOut = "TCP to " + ip.toString() + ":443 failed";
+        } else {
+          probe.stop();
+          errOut = "TLS handshake failed, free heap " + String(ESP.getFreeHeap());
+        }
+      }
+      errOut += " [" + String(HTTPClient::errorToString(code)) + "]";
+    }
+    return false;
+  }
   JsonDocument filter; filter[0]["tag_name"] = true;    // stream-parse only each tag
   JsonDocument doc;
   const DeserializationError err =
       deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
   http.end();
-  if (err) return false;
+  if (err) { errOut = "release list parse failed"; return false; }
   tags.clear();
   for (JsonObject o : doc.as<JsonArray>()) {
     const String t = String(o["tag_name"] | "");
     if (t.length()) tags.push_back(t);
   }
-  return !tags.empty();  // GitHub returns releases newest-first
+  if (tags.empty()) { errOut = "no releases returned"; return false; }
+  return true;  // GitHub returns releases newest-first
 }
 
 static void fwUpdDoCheck() {
@@ -5165,16 +5191,17 @@ static void fwUpdDoCheck() {
     gFwUpd.busy = true; gFwUpd.phase = "checking"; xSemaphoreGive(fwUpdMux);
   }
   std::vector<String> tags;
-  bool ok = fwUpdFetchReleases(tags);
+  String err1, err2;
+  bool ok = fwUpdFetchReleases(tags, err1);
   if (!ok) {
     // Retry with BLE torn down to free internal heap for the TLS handshake —
-    // the likely cause of a failed check on a memory-tight device (same reason
+    // a likely cause of a failed check on a memory-tight device (same reason
     // the install path frees BLE). Restore BLE afterward.
     fwUpdateActive = true;
     delay(50);
     NimBLEDevice::deinit(true);
     bms.initialized = false;
-    ok = fwUpdFetchReleases(tags);
+    ok = fwUpdFetchReleases(tags, err2);
     bleBms.begin();
     fwUpdateActive = false;
   }
@@ -5192,7 +5219,9 @@ static void fwUpdDoCheck() {
       gFwUpd.error = "";
     } else {
       gFwUpd.phase = "error";
-      gFwUpd.error = "Could not reach GitHub";
+      gFwUpd.error = err1;
+      if (err2.length() && err2 != err1) gFwUpd.error += "; retry w/o BLE: " + err2;
+      else if (err2.length())            gFwUpd.error += " (also with BLE off)";
     }
     xSemaphoreGive(fwUpdMux);
   }
