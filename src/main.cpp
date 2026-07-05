@@ -19,6 +19,7 @@
 #include <esp_system.h>
 #include <esp_wifi.h>
 #include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
 #include <nvs_flash.h>
 
 #include <Arduino_GFX_Library.h>
@@ -5098,9 +5099,33 @@ static FirmwareUpdateState gFwUpd;
 static SemaphoreHandle_t   fwUpdMux        = nullptr;
 static TaskHandle_t        fwUpdTaskHandle = nullptr;
 static volatile bool       fwUpdateActive  = false;  // pauses BLE loop during flash
+static volatile bool       bleLoopBusy     = false;  // loop() is inside bleBms.loop()
 
-static constexpr uint32_t FWUPD_CHECK_BIT = 0x01;
-static constexpr uint32_t FWUPD_APPLY_BIT = 0x02;
+static constexpr uint32_t FWUPD_CHECK_BIT        = 0x01;
+static constexpr uint32_t FWUPD_APPLY_BIT        = 0x02;
+static constexpr uint32_t FWUPD_CHECK_MANUAL_BIT = 0x04;
+
+// Tearing NimBLE down while loop() is inside a BLE call corrupts the radio /
+// network stack (Wi-Fi goes fully dead while the LCD keeps running). Handshake:
+// raise the pause flag, then wait for loop() to actually leave bleBms.loop()
+// before deinit. loop() sets bleLoopBusy BEFORE re-checking fwUpdateActive, so
+// once the wait below observes !bleLoopBusy, no new BLE call can start.
+static void fwUpdPauseBle() {
+  fwUpdateActive = true;
+  const uint32_t t0 = millis();
+  while (bleLoopBusy && millis() - t0 < 8000) delay(10);
+  delay(50);
+  NimBLEDevice::deinit(true);
+  bms.initialized = false;
+  bms.connected = false;
+  bms.authenticated = false;
+  bms.status = "paused for update";
+}
+
+static void fwUpdResumeBle() {
+  bleBms.begin();
+  fwUpdateActive = false;
+}
 
 static void fwUpdSetPhase(const char *phase, const String &err = "") {
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
@@ -5186,24 +5211,20 @@ static bool fwUpdFetchReleases(std::vector<String> &tags, String &errOut) {
   return true;  // GitHub returns releases newest-first
 }
 
-static void fwUpdDoCheck() {
+static void fwUpdDoCheck(bool bleFallback) {
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = true; gFwUpd.phase = "checking"; xSemaphoreGive(fwUpdMux);
   }
   std::vector<String> tags;
   String err1, err2;
   bool ok = fwUpdFetchReleases(tags, err1);
-  if (!ok) {
-    // Retry with BLE torn down to free internal heap for the TLS handshake —
-    // a likely cause of a failed check on a memory-tight device (same reason
-    // the install path frees BLE). Restore BLE afterward.
-    fwUpdateActive = true;
-    delay(50);
-    NimBLEDevice::deinit(true);
-    bms.initialized = false;
+  if (!ok && bleFallback) {
+    // Manual checks only: retry with BLE torn down to free internal heap for
+    // the TLS handshake. Never done for background checks — a periodic check
+    // must not interrupt BLE (and hour/pay tracking) mid-mow.
+    fwUpdPauseBle();
     ok = fwUpdFetchReleases(tags, err2);
-    bleBms.begin();
-    fwUpdateActive = false;
+    fwUpdResumeBle();
   }
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = false;
@@ -5239,15 +5260,9 @@ static void fwUpdDoApply() {
   }
   if (tag.isEmpty()) { fwUpdSetPhase("error", "No release selected"); return; }
 
-  // Free internal heap for the TLS session by tearing BLE down, and stop the
-  // main loop from touching the NimBLE stack concurrently while we do.
-  fwUpdateActive = true;
-  delay(50);
-  NimBLEDevice::deinit(true);
-  bms.initialized = false;
-  bms.connected = false;
-  bms.authenticated = false;
-  bms.status = "paused for update";
+  // Free internal heap for the TLS session by tearing BLE down — with the
+  // loop handshake so we never deinit while a BLE call is in flight.
+  fwUpdPauseBle();
 
   const String url = "https://github.com/" + String(kUpdateRepo) +
                      "/releases/download/" + tag + "/firmware.bin";
@@ -5280,13 +5295,12 @@ static void fwUpdDoApply() {
     xSemaphoreGive(fwUpdMux);
   }
   // Bring BLE back so the device keeps working after a failed attempt.
-  bleBms.begin();
-  fwUpdateActive = false;
+  fwUpdResumeBle();
 }
 
 static void fwUpdTask(void *) {
   vTaskDelay(pdMS_TO_TICKS(25000));  // let Wi-Fi/NTP settle after boot
-  if (settings.autoUpdateCheck) fwUpdDoCheck();
+  if (settings.autoUpdateCheck) fwUpdDoCheck(false);
   for (;;) {
     uint32_t bits = 0;
     const TickType_t wait = settings.autoUpdateCheck
@@ -5294,7 +5308,7 @@ static void fwUpdTask(void *) {
         : portMAX_DELAY;
     xTaskNotifyWait(0, ULONG_MAX, &bits, wait);
     if (bits & FWUPD_APPLY_BIT) fwUpdDoApply();
-    else                        fwUpdDoCheck();  // manual notify or periodic timeout
+    else fwUpdDoCheck((bits & FWUPD_CHECK_MANUAL_BIT) != 0);  // manual or periodic
   }
 }
 
@@ -5320,7 +5334,7 @@ void apiUpdateStatus() {
 void apiUpdateCheck() {
   if (!fwUpdTaskHandle) { server.send(503, "application/json", F("{\"error\":\"not_ready\"}")); return; }
   if (WiFi.status() != WL_CONNECTED) { server.send(503, "application/json", F("{\"error\":\"offline\"}")); return; }
-  xTaskNotify(fwUpdTaskHandle, FWUPD_CHECK_BIT, eSetBits);
+  xTaskNotify(fwUpdTaskHandle, FWUPD_CHECK_BIT | FWUPD_CHECK_MANUAL_BIT, eSetBits);
   server.send(200, "application/json", F("{\"ok\":true}"));
 }
 
@@ -5405,6 +5419,7 @@ void handleUpdateUpload() {
   } else if (updateOriginBlocked || updateBadImage) {
     return;
   } else if (upload.status == UPLOAD_FILE_WRITE) {
+    esp_task_wdt_reset();  // long uploads run inside this one handler call
     // Reject anything that isn't an ESP32 app image before committing. App
     // images carry the app-descriptor magic 0xABCD5432 at offset 0x20; a
     // merged/bootloader bin (a common wrong-file mistake) does not.
@@ -5589,6 +5604,12 @@ void setup() {
   drawDisplay(true);
   Serial.printf("WiFi mode: %s\n", provisioningActive ? "setup AP" : "STA");
   Serial.printf("Touch %s\n", touchReady ? "ready" : "missing");
+  // Loop watchdog: if the main loop ever hard-blocks (>30 s), reboot instead of
+  // freezing until a power-cycle. 30 s clears every legitimate long operation
+  // (blocking Wi-Fi scan ~10 s, BLE scan 3 s); the manual firmware upload feeds
+  // the WDT per received chunk. Rollback protection makes a WDT reboot safe.
+  esp_task_wdt_init(30, true);
+  enableLoopWDT();
   // Boot reached a healthy state — confirm this OTA image so the bootloader
   // won't roll it back. (No-op when not booting a pending OTA image.)
   esp_ota_mark_app_valid_cancel_rollback();
@@ -5598,7 +5619,9 @@ void loop() {
   server.handleClient();
   ArduinoOTA.handle();
   maintainWiFi();
-  if (!fwUpdateActive) bleBms.loop();  // BLE stack is torn down during a self-update
+  bleLoopBusy = true;                   // set BEFORE the check — see fwUpdPauseBle
+  if (!fwUpdateActive) bleBms.loop();   // BLE stack is torn down during a self-update
+  bleLoopBusy = false;
   updateSocRate();
   updateDegradation();
   updateMqtt();
