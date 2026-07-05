@@ -33,12 +33,12 @@ This maps naturally onto the four activity states from `TASKS.md` M2.
 | Counter | NVS Key | Increments when |
 |---|---|---|
 | `hoursTotal` | `hrs_total` | Device is powered on (always) |
-| `hoursStandby` | `hrs_standby` | \|current\| < `activityAmps` AND not charging |
+| `hoursStandby` | `hrs_standby` | \|current\| < `activityAmps`, or charging |
 | `hoursActive` | `hrs_active` | discharge >= `activityAmps` |
 | `hoursWorking` | `hrs_working` | discharge >= `workAmps` |
 
-Note: charging time is counted in `hoursTotal` but not in any sub-category
-counter. Working time is also active time, so the invariant is
+Note: charging time is counted as standby when the ESP32 remains powered and
+the BMS data is fresh. Working time is also active time, so the invariant is
 `hoursTotal >= hoursActive >= hoursWorking`. Idle/non-active time is the
 remainder after active time.
 

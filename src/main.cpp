@@ -2517,6 +2517,7 @@ static String csvEscape(const String &s);  // forward decl; defined after mainte
 static bool   hdayEnabled();               // forward decl; defined with heatmap helpers below
 static bool   isLeapYear(int y);           // forward decl
 static int    daysInYear(int y);           // forward decl
+static float  workBetween(uint32_t fromTs, uint32_t toTs);
 
 static String jsonEscape(const String &s) {
   String out;
@@ -2540,6 +2541,39 @@ static int daysInYear(int y) { return isLeapYear(y) ? 366 : 365; }
 
 static bool hdayEnabled() {
   return settings.trackDailyActivity && !settings.wifiSsid.isEmpty();
+}
+
+static uint8_t hdayTenths(float hours) {
+  if (!isfinite(hours) || hours <= 0.0f) return 0;
+  return static_cast<uint8_t>(min(255.0f, hours * 10.0f + 0.5f));
+}
+
+static bool hdayDayBounds(int year, int yday, uint32_t &dayStart, uint32_t &dayEnd) {
+  if (year < 2020 || year > 2099 || yday < 0 || yday >= daysInYear(year)) return false;
+  struct tm start = {};
+  start.tm_year = year - 1900;
+  start.tm_mon = 0;
+  start.tm_mday = yday + 1;
+  start.tm_isdst = -1;
+  const time_t startTs = mktime(&start);
+  struct tm end = {};
+  end.tm_year = year - 1900;
+  end.tm_mon = 0;
+  end.tm_mday = yday + 2;
+  end.tm_isdst = -1;
+  const time_t endTs = mktime(&end);
+  if (startTs <= 0 || endTs <= startTs) return false;
+  dayStart = static_cast<uint32_t>(startTs);
+  dayEnd = static_cast<uint32_t>(endTs);
+  return true;
+}
+
+static void applyWorkLogToHday(int year, int yday, float &activeH, float &workingH) {
+  uint32_t dayStart = 0, dayEnd = 0;
+  if (!hdayDayBounds(year, yday, dayStart, dayEnd)) return;
+  const float loggedWorking = workBetween(dayStart, dayEnd);
+  if (loggedWorking > workingH) workingH = loggedWorking;
+  if (activeH < workingH) activeH = workingH;
 }
 
 void initHdaySnapshot() {
@@ -2576,9 +2610,9 @@ static void saveHdayRecord(int year, int yday, float sta, float act, float wrk) 
   std::vector<uint8_t> buf(static_cast<size_t>(days * 4), 0);
   const size_t stored = p.getBytesLength(key);
   if (stored == static_cast<size_t>(days * 4)) p.getBytes(key, buf.data(), stored);
-  buf[yday * 4 + 0] = static_cast<uint8_t>(min(255.0f, sta * 10.0f));
-  buf[yday * 4 + 1] = static_cast<uint8_t>(min(255.0f, act * 10.0f));
-  buf[yday * 4 + 2] = static_cast<uint8_t>(min(255.0f, wrk * 10.0f));
+  buf[yday * 4 + 0] = hdayTenths(sta);
+  buf[yday * 4 + 1] = hdayTenths(act);
+  buf[yday * 4 + 2] = hdayTenths(wrk);
   // byte 3 reserved for future flags (charge cycle etc.)
   p.putBytes(key, buf.data(), buf.size());
   p.end();
@@ -2588,13 +2622,13 @@ void checkHdayRollover() {
   if (!hdayEnabled()) return;
   static uint32_t lastHdayCheckMs = 0;
   const uint32_t nowMs = millis();
-  if (nowMs - lastHdayCheckMs < 60000UL) return;
-  lastHdayCheckMs = nowMs;
+  if (lastHdayCheckMs != 0 && nowMs - lastHdayCheckMs < 60000UL) return;
   struct tm ti;
   if (!getLocalTime(&ti, 0)) return;
   const int nowYear = ti.tm_year + 1900;
   const int nowYday = ti.tm_yday;
   if (nowYear < 2020 || nowYear > 2099) return;  // don't roll over on a bogus clock
+  lastHdayCheckMs = nowMs;
   if (hdaySnapYday < 0) {
     // First valid time read — seed snapshot without writing a record
     hdaySnapSta  = hoursStandby;
@@ -2608,8 +2642,9 @@ void checkHdayRollover() {
   if (nowYear == hdaySnapYear && nowYday == hdaySnapYday) return;
   // Day rolled over: save the completed day then advance the snapshot
   const float dSta = max(0.0f, hoursStandby - hdaySnapSta);
-  const float dAct = max(0.0f, hoursActive   - hdaySnapAct);
-  const float dWrk = max(0.0f, hoursWorking  - hdaySnapWrk);
+  float dAct = max(0.0f, hoursActive   - hdaySnapAct);
+  float dWrk = max(0.0f, hoursWorking  - hdaySnapWrk);
+  applyWorkLogToHday(hdaySnapYear, hdaySnapYday, dAct, dWrk);
   saveHdayRecord(hdaySnapYear, hdaySnapYday, dSta, dAct, dWrk);
   hdaySnapSta  = hoursStandby;
   hdaySnapAct  = hoursActive;
@@ -2625,6 +2660,19 @@ void apiHeatmapGet() {
   if (!getLocalTime(&ti, 50)) { server.send(503, "application/json", F("{\"error\":\"no_time\"}")); return; }
   const int curYear = ti.tm_year + 1900;
   const int curYday = ti.tm_yday;
+  std::map<String, std::vector<String>> maintByDate;
+  for (const auto &item : maintenanceItems) {
+    loadMaintenanceHistoryFor(item.id);
+    const auto hit = maintHistory.find(item.id);
+    if (hit == maintHistory.end()) continue;
+    for (const auto &e : hit->second) {
+      if (!e.ts) continue;
+      time_t t = static_cast<time_t>(e.ts);
+      struct tm tm; char ds[12] = "";
+      if (localtime_r(&t, &tm)) strftime(ds, sizeof(ds), "%Y-%m-%d", &tm);
+      if (ds[0]) maintByDate[String(ds)].push_back(item.name);
+    }
+  }
   // Collect years that have data plus the current year
   std::vector<int> years;
   {
@@ -2671,9 +2719,13 @@ void apiHeatmapGet() {
     // live from the day-start snapshot so the current day shows in-progress.
     if (year == curYear && hdaySnapYear == curYear && hdaySnapYday == curYday &&
         curYday >= 0 && curYday < days) {
-      buf[curYday * 4 + 0] = static_cast<uint8_t>(min(255.0f, max(0.0f, hoursStandby - hdaySnapSta) * 10.0f));
-      buf[curYday * 4 + 1] = static_cast<uint8_t>(min(255.0f, max(0.0f, hoursActive  - hdaySnapAct) * 10.0f));
-      buf[curYday * 4 + 2] = static_cast<uint8_t>(min(255.0f, max(0.0f, hoursWorking - hdaySnapWrk) * 10.0f));
+      float liveSta = max(0.0f, hoursStandby - hdaySnapSta);
+      float liveAct = max(0.0f, hoursActive  - hdaySnapAct);
+      float liveWrk = max(0.0f, hoursWorking - hdaySnapWrk);
+      applyWorkLogToHday(curYear, curYday, liveAct, liveWrk);
+      buf[curYday * 4 + 0] = hdayTenths(liveSta);
+      buf[curYday * 4 + 1] = hdayTenths(liveAct);
+      buf[curYday * 4 + 2] = hdayTenths(liveWrk);
     }
     server.sendContent("\"");
     server.sendContent(String(year));
@@ -2695,6 +2747,22 @@ void apiHeatmapGet() {
       }
       server.sendContent(chunk);
       yield();
+    }
+    server.sendContent("]");
+  }
+  server.sendContent(F("},\"maintenance\":{"));
+  bool firstDate = true;
+  for (const auto &kv : maintByDate) {
+    if (!firstDate) server.sendContent(",");
+    firstDate = false;
+    server.sendContent("\"");
+    server.sendContent(jsonEscape(kv.first));
+    server.sendContent("\":[");
+    for (size_t i = 0; i < kv.second.size(); i++) {
+      if (i) server.sendContent(",");
+      server.sendContent("\"");
+      server.sendContent(jsonEscape(kv.second[i]));
+      server.sendContent("\"");
     }
     server.sendContent("]");
   }
@@ -2847,10 +2915,12 @@ static void trimWorkSessions() {
 
 // Called every hour tick with the current, staleness-guarded Working state.
 static void trackWorkSession(bool working) {
-  if (!settings.trackPay) return;
+  const bool logNeeded = settings.trackPay || hdayEnabled();
+  if (!logNeeded && !workSessionOpen) return;
   const time_t nowT = time(nullptr);
   if (nowT < 1700000000L) return;  // need a real clock before we can log spans
   const uint32_t nowTs = static_cast<uint32_t>(nowT);
+  if (!logNeeded) working = false;  // close any open span when tracking is disabled
   if (working && !workSessionOpen) {
     trimWorkSessions();
     WorkSession s; s.start = nowTs; s.end = 0;
@@ -3067,6 +3137,8 @@ void apiPayGet() {
   JsonDocument doc;
   doc["track_pay"]    = settings.trackPay;
   doc["hday_enabled"] = hdayEnabled();
+  doc["active_label"]  = settings.labelActive;
+  doc["work_label"]    = settings.labelWorking;
   JsonArray arr = doc["records"].to<JsonArray>();
   if (settings.trackPay) {
     const uint32_t now = static_cast<uint32_t>(time(nullptr));
@@ -3996,7 +4068,7 @@ void updateHours() {
       switch (state) {
         case ActivityState::Working:  hoursActive += deltaH; hoursWorking += deltaH; sessionActiveHours += deltaH; break;
         case ActivityState::Active:   hoursActive += deltaH;  sessionActiveHours += deltaH; break;
-        case ActivityState::Charging: /* charging time in total only */                      break;
+        case ActivityState::Charging: hoursStandby += deltaH;                                break;
         default:                      hoursStandby += deltaH;                                break;
       }
       working = (state == ActivityState::Working);
@@ -4314,8 +4386,8 @@ void drawDisplay(bool fullRedraw) {
   s.mqttStatus = settings.mqttEnabled ? String("MQTT ") + mqttClient.statusLabel() : String("");
   s.maintOverdue = maintOverdueCount();
   s.touchReady = touchReady;
-  s.hoursActStr = String(hoursActive, 1) + "h act";
-  s.hoursWorkStr = String(hoursWorking, 1) + "h wrk";
+  s.hoursActStr = String(hoursActive, 1) + "h " + settings.labelActive;
+  s.hoursWorkStr = String(hoursWorking, 1) + "h " + settings.labelWorking;
   s.use24h = settings.timeFormat == "24h";
   s.powerSaveEnabled = settings.powerSaveEnabled;
   s.apPassword = settings.apPassword;
@@ -4502,6 +4574,10 @@ void addStatusJson(JsonDocument &doc) {
   vehicle["usage_label"] = usage.label;
   vehicle["activity_state"] = activityStateKey(aState);
   vehicle["activity_label"] = stateLabel(aState);
+  vehicle["standby_label"] = settings.labelStandby;
+  vehicle["active_label"] = settings.labelActive;
+  vehicle["work_label"] = settings.labelWorking;
+  vehicle["charging_label"] = settings.labelCharging;
   vehicle["mode"] = mowerModeLabel();
   vehicle["active"] = activityDetected();
   vehicle["work_likely"] = workDetected();
@@ -5082,6 +5158,7 @@ void apiBatteryOff() {
 // straight from the release and applies it via the OTA slot. Runs on a
 // dedicated core-0 task so the web server stays responsive for status polls.
 static const char *kUpdateRepo = "Picklepc/R48Display";
+static const char *kUpdateIndexUrl = "https://picklepc.github.io/R48Display/versions.json";
 
 struct FirmwareUpdateState {
   String   latestVersion;        // "0.3.6" (v-stripped); empty until first check
@@ -5157,7 +5234,63 @@ static bool versionIsNewer(const String &candidate, const String &base) {
   return cc > bc;
 }
 
-static bool fwUpdFetchReleases(std::vector<String> &tags, String &errOut) {
+static String fwUpdConnectionError(const char *host, int code) {
+  IPAddress ip;
+  String err;
+  if (!WiFi.hostByName(host, ip)) {
+    err = "DNS lookup failed";
+  } else {
+    WiFiClient probe;
+    if (!probe.connect(ip, 443, 6000)) {
+      err = "TCP to " + ip.toString() + ":443 failed";
+    } else {
+      probe.stop();
+      err = "TLS handshake failed, free heap " + String(ESP.getFreeHeap());
+    }
+  }
+  err += " [" + String(HTTPClient::errorToString(code)) + "]";
+  return err;
+}
+
+static bool fwUpdFetchInstallerIndex(std::vector<String> &tags, String &errOut) {
+  if (WiFi.status() != WL_CONNECTED) { errOut = "Wi-Fi not connected"; return false; }
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(15);
+  HTTPClient http;
+  http.setConnectTimeout(8000);
+  http.setTimeout(8000);
+  http.setReuse(false);
+  http.useHTTP10(true);
+  if (!http.begin(client, kUpdateIndexUrl)) { errOut = "HTTP begin failed"; return false; }
+  http.addHeader("User-Agent", "R48Display");
+  const int code = http.GET();
+  if (code != 200) {
+    http.end();
+    errOut = code > 0 ? "GitHub Pages HTTP " + String(code)
+                      : fwUpdConnectionError("picklepc.github.io", code);
+    return false;
+  }
+  JsonDocument filter;
+  filter["versions"][0]["tag"] = true;
+  JsonDocument doc;
+  const DeserializationError err =
+      deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (err) { errOut = "installer index parse failed"; return false; }
+  tags.clear();
+  for (JsonObject o : doc["versions"].as<JsonArray>()) {
+    String t = String(o["tag"] | "");
+    if (t.length()) {
+      if (t[0] != 'v' && t[0] != 'V') t = "v" + t;
+      tags.push_back(t);
+    }
+  }
+  if (tags.empty()) { errOut = "installer index empty"; return false; }
+  return true;
+}
+
+static bool fwUpdFetchGitHubApi(std::vector<String> &tags, String &errOut) {
   if (WiFi.status() != WL_CONNECTED) { errOut = "Wi-Fi not connected"; return false; }
   WiFiClientSecure client;
   client.setInsecure();  // integrity comes from the OTA image validation, not the cert
@@ -5179,20 +5312,7 @@ static bool fwUpdFetchReleases(std::vector<String> &tags, String &errOut) {
     if (code > 0) {
       errOut = "GitHub HTTP " + String(code);
     } else {
-      // Connection-level failure: probe each stage so the UI names the culprit.
-      IPAddress ip;
-      if (!WiFi.hostByName("api.github.com", ip)) {
-        errOut = "DNS lookup failed";
-      } else {
-        WiFiClient probe;
-        if (!probe.connect(ip, 443, 6000)) {
-          errOut = "TCP to " + ip.toString() + ":443 failed";
-        } else {
-          probe.stop();
-          errOut = "TLS handshake failed, free heap " + String(ESP.getFreeHeap());
-        }
-      }
-      errOut += " [" + String(HTTPClient::errorToString(code)) + "]";
+      errOut = fwUpdConnectionError("api.github.com", code);
     }
     return false;
   }
@@ -5209,6 +5329,17 @@ static bool fwUpdFetchReleases(std::vector<String> &tags, String &errOut) {
   }
   if (tags.empty()) { errOut = "no releases returned"; return false; }
   return true;  // GitHub returns releases newest-first
+}
+
+static bool fwUpdFetchReleases(std::vector<String> &tags, String &errOut) {
+  String indexErr;
+  if (fwUpdFetchInstallerIndex(tags, indexErr)) return true;
+
+  String apiErr;
+  if (fwUpdFetchGitHubApi(tags, apiErr)) return true;
+
+  errOut = "installer index: " + indexErr + "; GitHub API: " + apiErr;
+  return false;
 }
 
 static void fwUpdDoCheck(bool bleFallback) {
@@ -5630,8 +5761,8 @@ void loop() {
     saveBmsCache();
   }
   R48Mic::loop(activityDetected());
-  updateHours();
   checkHdayRollover();
+  updateHours();
   maybeProbeTouch();
   maybeHandleTouch();
   pollButtons();

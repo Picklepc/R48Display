@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.4.5](docs/releases/v0.4.5.md) | Reduce Settings/Maintenance web load; fix current-day heatmap/pay timekeeping and custom activity-label consistency. |
 | [v0.4.4](docs/releases/v0.4.4.md) | Fix BLE-teardown race that froze the unit / killed Wi-Fi after a failed update check; 30 s loop watchdog auto-reboots any hard freeze. |
 | [v0.4.3](docs/releases/v0.4.3.md) | Update-check fix (dropped User-Agent header) + staged failure diagnostics (DNS/TCP/TLS/HTTP). |
 | [v0.4.2](docs/releases/v0.4.2.md) | Maintenance page no longer wedges the web server; hour-counting pauses made visible & stale-proof; version pickers in installer + settings. |

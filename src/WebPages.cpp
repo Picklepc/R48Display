@@ -24,8 +24,8 @@ String dashboardBody() {
       "</section>"
       "<section class='dash-strip'>"
       "<div class='metric'><div class='label'>Total Hours</div><div class='value' id='dash-hours'>--</div></div>"
-      "<div class='metric'><div class='label'>Active Hours</div><div class='value' id='dash-active-hours'>--</div></div>"
-      "<div class='metric'><div class='label'>Working Hours</div><div class='value' id='dash-working-hours'>--</div></div>"
+      "<div class='metric'><div class='label' id='dash-active-hours-label'>Active Hours</div><div class='value' id='dash-active-hours'>--</div></div>"
+      "<div class='metric'><div class='label' id='dash-working-hours-label'>Working Hours</div><div class='value' id='dash-working-hours'>--</div></div>"
       "<div class='metric'><div class='label'>Health</div><div class='value' id='dash-health'>--</div></div>"
       "<div class='metric'><div class='label'>Maintenance</div><div class='value sm' id='dash-maintenance'>Not configured</div></div>"
       "<div class='metric'><div class='label'>BMS Link</div><div class='value sm' id='dash-link'>--</div></div>"
@@ -498,8 +498,8 @@ String maintenanceBody() {
       "<label>Notes (optional)<input id='pf-notes' maxlength='80' autocomplete='off'></label>"
       "</div>"
       "<details style='margin-top:10px'>"
-      "<summary style='cursor:pointer;color:var(--muted);font-size:13px'>Or start at working-hours into a day</summary>"
-      "<p class='hint' style='margin:8px 0'>Back-date the start to a point inside a day's mowing &mdash; e.g. start after the first 1.5 hours so an earlier session goes to someone else. Overrides the date &amp; time above.</p>"
+      "<summary id='pf-start-work-summary' style='cursor:pointer;color:var(--muted);font-size:13px'>Or start at working-hours into a day</summary>"
+      "<p class='hint' id='pf-start-work-hint' style='margin:8px 0'>Back-date the start to a point inside a day's working time &mdash; e.g. start after the first 1.5 hours so an earlier session goes to someone else. Overrides the date &amp; time above.</p>"
       "<div style='display:flex;gap:8px;align-items:flex-end'>"
       "<label style='flex:1'>Day<input id='pf-start-day' type='date' onchange='payStartDayInfo()'></label>"
       "<label style='width:120px'>Hours into day<input id='pf-start-hours' type='number' min='0' step='0.1' placeholder='0'></label>"
@@ -619,6 +619,8 @@ let usageCategories = [];
 let _loadedHoursBaseline = 0;
 let machineFields = [];
 let maintHistoryEntries = {};
+let _maintSummaryLast = 0;
+let _maintSummaryBusy = false;
 
 function get(obj, path, fallback = '--') {
   return path.split('.').reduce((o, key) => (o && o[key] !== undefined) ? o[key] : undefined, obj) ?? fallback;
@@ -644,7 +646,7 @@ function postForm(url, data) {
 }
 
 function escAttr(value) {
-  return String(value ?? '').replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+  return String(value ?? '').replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll("'",'&#39;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 }
 
 function chooseWifi(ssid) {
@@ -734,8 +736,8 @@ function renderTemps(temps, unit) {
 function renderDetails(data) {
   const body = $('details');
   if (!body) return;
-  const activeLabel = get(data, 'usage.active_label', 'activity');
-  const workLabel = get(data, 'usage.work_label', 'work');
+  const activeLabel = get(data, 'vehicle.active_label', get(data, 'usage.active_label', 'activity'));
+  const workLabel = get(data, 'vehicle.work_label', get(data, 'usage.work_label', 'work'));
   const rows = [
     ['Host', get(data, 'hostname')],
     ['Usage', `${get(data, 'usage.label')} / ${get(data, 'vehicle.label')}`],
@@ -768,7 +770,7 @@ function renderDetails(data) {
     ['Display page', get(data, 'display.page_name')],
     ['Clock', get(data, 'clock.local_time')]
   ];
-  body.innerHTML = rows.map(([k, v]) => `<tr><th>${k}</th><td>${v === '' ? '--' : v}</td></tr>`).join('');
+  body.innerHTML = rows.map(([k, v]) => `<tr><th>${escAttr(k)}</th><td>${escAttr(v === '' ? '--' : v)}</td></tr>`).join('');
 }
 
 function render(data) {
@@ -785,6 +787,8 @@ function render(data) {
     ? fmtNum(get(data, 'vehicle.charge_estimate_hours', get(data, 'mower.charge_estimate_hours')), 1, ' h to full')
     : fmtNum(get(data, 'vehicle.runtime_estimate_hours', get(data, 'mower.runtime_estimate_hours')), 1, ' h'));
   text('dash-hours', fmtNum(get(data, 'hours.total'), 1, ' h'));
+  text('dash-active-hours-label', `${get(data, 'vehicle.active_label', 'Active')} Hours`);
+  text('dash-working-hours-label', `${get(data, 'vehicle.work_label', 'Working')} Hours`);
   text('dash-active-hours', fmtNum(get(data, 'hours.active'), 1, ' h'));
   text('dash-working-hours', fmtNum(get(data, 'hours.working'), 1, ' h'));
   text('dash-health', fmtNum(get(data, 'bms.health_percent'), 1, '%'));
@@ -809,12 +813,14 @@ function render(data) {
   text('bh-hc', dg.high_current_events !== undefined ? String(dg.high_current_events) : '--');
 
   // Maintenance strip summary (fire-and-forget, non-blocking)
-  if ($('dash-maintenance')) {
+  if ($('dash-maintenance') && !_maintSummaryBusy && Date.now() - _maintSummaryLast > 30000) {
+    _maintSummaryBusy = true;
     fetch('/api/maintenance', {cache: 'no-store'}).then(r => r.json()).then(items => {
       const overdue = items.filter(i => i.overdue).length;
       const total = items.length;
       text('dash-maintenance', total === 0 ? 'None configured' : overdue > 0 ? `${overdue} item${overdue > 1 ? 's' : ''} due` : `${total} item${total > 1 ? 's' : ''}, all OK`);
-    }).catch(() => {});
+      _maintSummaryLast = Date.now();
+    }).catch(() => {}).finally(() => { _maintSummaryBusy = false; });
   }
 
   // Battery monitor page
@@ -946,7 +952,9 @@ async function loadUsageCategories() {
 async function loadSettings() {
   const form = $('settings-form');
   if (!form) return;
-  await Promise.all([loadProfiles(), loadThemes(), loadUsageCategories()]);
+  await loadProfiles();
+  await loadThemes();
+  await loadUsageCategories();
   const res = await fetch('/api/settings', {cache: 'no-store'});
   const data = await res.json();
   qsa('#settings-form [name]').forEach((el) => {
@@ -1262,13 +1270,18 @@ function watchForReboot() {
   setTimeout(() => clearInterval(timer), 240000);  // give up after 4 min
 }
 
-refresh();
-setInterval(refresh, 2500);
-refreshWeather();
-setInterval(refreshWeather, 5 * 60 * 1000);
+if ($('dash-soc') || $('bat-soc-gauge') || $('details')) {
+  refresh();
+  setInterval(refresh, 2500);
+}
+if ($('wx-forecast')) {
+  refreshWeather();
+  setInterval(refreshWeather, 5 * 60 * 1000);
+}
 
 // ── Pay records ───────────────────────────────────────────────────────────────
 let _payRecords = [];
+let _payWorkLabel = 'Working';
 
 function _fmtDate(ts) {
   if (!ts) return '&mdash;';
@@ -1285,12 +1298,29 @@ function _ymd(dt) {
 function _ymdhm(dt) {
   return `${_ymd(dt)}T${String(dt.getHours()).padStart(2,'0')}:${String(dt.getMinutes()).padStart(2,'0')}`;
 }
+function _payWorkHoursLabel() {
+  return `${_payWorkLabel || 'Working'} Hours`;
+}
+function _payWorkPhrase() {
+  return String(_payWorkLabel || 'working').toLowerCase();
+}
+function syncPayWorkLabels() {
+  const phrase = _payWorkPhrase();
+  const summary = $('pf-start-work-summary');
+  const hint = $('pf-start-work-hint');
+  const closeHint = $('pc-close-hint');
+  if (summary) summary.textContent = `Or start at ${phrase} hours into a day`;
+  if (hint) hint.textContent = `Back-date the start to a point inside a day's ${phrase} time - e.g. start after the first 1.5 hours so an earlier session goes to someone else. Overrides the date and time above.`;
+  if (closeHint) closeHint.textContent = `Leave blank to close now (all hours so far). Set to N ${phrase} hours of today to split the day - the next period picks up where this ends.`;
+}
 
 async function loadPay() {
   const section = $('pay-section');
   const host    = $('pay-list');
   if (!host) return;
   const resp = await fetch('/api/pay',{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
+  _payWorkLabel = String(resp?.work_label || 'Working').trim() || 'Working';
+  syncPayWorkLabels();
   if (!resp || !resp.track_pay) {
     if (section) section.style.display = 'none';
     return;
@@ -1324,7 +1354,7 @@ async function loadPay() {
       </div>
       <div class='dash-strip' style='margin:8px 0'>
         <div class='metric'><div class='label'>Period Start</div><div class='value sm'>${sinceStr}</div></div>
-        <div class='metric'><div class='label'>Working Hours</div><div class='value'>${workStr}</div></div>
+        <div class='metric'><div class='label'>${escAttr(_payWorkHoursLabel())}</div><div class='value'>${workStr}</div></div>
         <div class='metric'><div class='label'>Earned</div><div class='value'>${earnStr}</div></div>
       </div>
       ${pr.notes ? `<p style='font-size:12px;color:var(--muted);margin:6px 0 8px'>${escAttr(pr.notes)}</p>` : ''}
@@ -1355,7 +1385,7 @@ async function payStartDayInfo() {
   const info = $('pf-start-dayinfo');
   if (!day) { info.textContent = ''; return; }
   const d = await fetch(`/api/pay/day?date=${day}`,{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
-  info.textContent = d ? `That day logged ${parseFloat(d.total_h).toFixed(1)} working hours. Enter 0 for the start of the day.`
+  info.textContent = d ? `That day logged ${parseFloat(d.total_h).toFixed(1)} ${_payWorkPhrase()} hours. Enter 0 for the start of the day.`
                        : 'No data for that day.';
   if ($('pf-start-hours').value === '') $('pf-start-hours').value = '0';
 }
@@ -1409,10 +1439,10 @@ async function openPayConfirm(id) {
   const since  = parseInt(pr.period_start) ? _fmtDate(parseInt(pr.period_start)) : '&mdash;';
   $('pay-confirm-summary').innerHTML =
     `<div><b>Period:</b> ${since} &rarr; today</div>` +
-    `<div><b>Working hours:</b> ${workH.toFixed(1)}\xa0h</div>` +
+    `<div><b>${escAttr(_payWorkHoursLabel())}:</b> ${workH.toFixed(1)}\xa0h</div>` +
     `<div><b>Calculated:</b> ${_fmtAmt(lbl, earned)}</div>`;
   $('pay-confirm-modal').style.display = 'flex';
-  // Show today's mowing total so the split field has a reference maximum.
+  // Show today's work total so the split field has a reference maximum.
   const today = _ymd(new Date());
   const d = await fetch(`/api/pay/day?date=${today}`,{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
   if (d) $('pc-close').placeholder = `now — today so far: ${parseFloat(d.total_h).toFixed(1)} h`;
@@ -1438,7 +1468,7 @@ async function confirmPay() {
   }
   const d = await res.json();
   closePayConfirm();
-  alert(`Recorded: ${parseFloat(d.work_h).toFixed(1)}\xa0h worked — period reset.`);
+  alert(`Recorded: ${parseFloat(d.work_h).toFixed(1)}\xa0h ${_payWorkPhrase()} - period reset.`);
   loadPay();
   loadPayStats();
 }
@@ -1560,6 +1590,8 @@ async function loadMaintHours() {
   const total = parseFloat(h.total)||Math.max(0, baseline + counted);
   const activeRaw = parseFloat(h.active)||0;
   const workingRaw = parseFloat(h.working)||0;
+  const activeLabel = get(data, 'vehicle.active_label', 'Active');
+  const workLabel = get(data, 'vehicle.work_label', 'Working');
   const active = Math.min(Math.max(activeRaw, 0), Math.max(total, 0));
   const working = Math.min(Math.max(workingRaw, 0), Math.max(active, 0));
   const bars = $('hours-bars'), legend = $('hours-legend');
@@ -1572,12 +1604,12 @@ async function loadMaintHours() {
   const fmt = v => `${(Number.isFinite(v) ? v : 0).toFixed(1)}h`;
   const pct = (v, max) => max > 0 ? Math.max(0, Math.min(100, v / max * 100)) : 0;
   const segment = (s, max) => s.val > 0.005
-    ? `<div title='${s.label}: ${fmt(s.val)}' style='width:${pct(s.val,max).toFixed(1)}%;background:${s.color};height:100%;transition:width .4s'></div>`
+    ? `<div title='${escAttr(s.label)}: ${fmt(s.val)}' style='width:${pct(s.val,max).toFixed(1)}%;background:${s.color};height:100%;transition:width .4s'></div>`
     : '';
   const row = (title, note, max, segs) => `
     <div>
       <div style='display:flex;justify-content:space-between;gap:8px;font-size:13px;margin-bottom:4px'>
-        <span>${title}</span><span style='color:var(--muted)'>${note}</span>
+        <span>${escAttr(title)}</span><span style='color:var(--muted)'>${escAttr(note)}</span>
       </div>
       <div style='display:flex;height:18px;border-radius:6px;overflow:hidden;background:var(--line)'>
         ${segs.map(s=>segment(s,max)).join('')}
@@ -1588,9 +1620,9 @@ async function loadMaintHours() {
       {label:'Original install', val:baseline, color:'var(--muted)'},
       {label:'Tracked since install', val:Math.max(0, total - baseline), color:'var(--primary)'},
     ]),
-    row('Working / Active / Total', `${fmt(workingRaw)} working / ${fmt(activeRaw)} active / ${fmt(total)} total`, total, [
-      {label:'Working', val:working, color:'var(--bad)'},
-      {label:'Active, not working', val:Math.max(0, active - working), color:'var(--warn)'},
+    row(`${workLabel} / ${activeLabel} / Total`, `${fmt(workingRaw)} ${workLabel.toLowerCase()} / ${fmt(activeRaw)} ${activeLabel.toLowerCase()} / ${fmt(total)} total`, total, [
+      {label:workLabel, val:working, color:'var(--bad)'},
+      {label:`${activeLabel}, not ${workLabel.toLowerCase()}`, val:Math.max(0, active - working), color:'var(--warn)'},
       {label:'Total, not active', val:Math.max(0, total - active), color:'var(--line)'},
     ]),
   ].join('');
@@ -1601,10 +1633,10 @@ async function loadMaintHours() {
     {label:'Total',val:total,color:'var(--text)'},
     {label:'Install',val:baseline,color:'var(--muted)'},
     {label:'Tracked',val:counted,color:'var(--primary)'},
-    {label:'Active',val:activeRaw,color:'var(--warn)'},
-    {label:'Working',val:workingRaw,color:'var(--bad)'},
+    {label:activeLabel,val:activeRaw,color:'var(--warn)'},
+    {label:workLabel,val:workingRaw,color:'var(--bad)'},
   ].map(s =>
-    `<span style='display:inline-flex;align-items:center;gap:4px'><span style='width:10px;height:10px;border-radius:2px;background:${s.color};flex-shrink:0'></span><b>${fmt(s.val)}</b>&nbsp;${s.label}</span>`
+    `<span style='display:inline-flex;align-items:center;gap:4px'><span style='width:10px;height:10px;border-radius:2px;background:${s.color};flex-shrink:0'></span><b>${fmt(s.val)}</b>&nbsp;${escAttr(s.label)}</span>`
   ).join('') + (warnings.length ? `<span style='color:var(--bad)'>${warnings.join(' ')}</span>` : '');
 }
 
@@ -1816,6 +1848,8 @@ async function initHeatmap() {
   if (!raw) return;
   _hmData = raw;
   _hmYear = raw.cur_year;
+  _hmMaint = raw.maintenance || {};
+  if (!raw.maintenance) {
   // Build maint-by-date index from all history
   const items = _maintItems.length ? _maintItems
     : await fetch('/api/maintenance', {cache:'no-store'}).then(r => r.json()).catch(() => []);
@@ -1827,6 +1861,7 @@ async function initHeatmap() {
       const key = _ymd(new Date(e.ts * 1000));
       (_hmMaint[key] = _hmMaint[key] || []).push(it.name);
     }
+  }
   }
   card.style.display = '';
   renderHeatmap();

@@ -326,14 +326,14 @@ void buildDashboard() {
   w.metric[0] = label(w.root, "--", 76, 105, 208, &lv_font_montserrat_48, COL_TEXT, LV_TEXT_ALIGN_CENTER);
   w.metric[1] = label(w.root, "--", 92, 154, 176, &lv_font_montserrat_20, COL_MUTED, LV_TEXT_ALIGN_CENTER);
 
-  w.status = panel(w.root, 102, 185, 156, 34, COL_PANEL_2, 16);
+  w.status = panel(w.root, 82, 185, 196, 34, COL_PANEL_2, 16);
   w.statusDot = lv_obj_create(w.status);
   lv_obj_clear_flag(w.statusDot, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_pos(w.statusDot, 13, 12);
   lv_obj_set_size(w.statusDot, 10, 10);
   lv_obj_set_style_radius(w.statusDot, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_border_width(w.statusDot, 0, 0);
-  w.metric[2] = label(w.status, "--", 30, 8, 112, &lv_font_montserrat_16, COL_PRIMARY, LV_TEXT_ALIGN_CENTER);
+  w.metric[2] = label(w.status, "--", 34, 8, 146, &lv_font_montserrat_16, COL_PRIMARY, LV_TEXT_ALIGN_CENTER);
 
   // Row 1: ETA centered and wider
   metric(4, "ETA", 96, 242, 168, &lv_font_montserrat_18);
