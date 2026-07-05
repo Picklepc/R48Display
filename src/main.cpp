@@ -5333,17 +5333,16 @@ static void fwUpdDoCheck(bool bleFallback) {
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = true; gFwUpd.phase = "checking"; xSemaphoreGive(fwUpdMux);
   }
+  (void)bleFallback;  // BLE is NOT torn down for a check anymore — see below.
+  // Single best-effort attempt. The old fallback tore NimBLE down to free heap
+  // for the TLS buffers, but (a) it didn't help — the mbedTLS buffers on
+  // arduino-esp32 2.0.17 need two large contiguous internal blocks this device
+  // can't provide even with BLE off, and (b) the teardown/re-init churned the
+  // radio + heap and left the web server unresponsive. A failed check must stay
+  // harmless; updates go through the USB web installer.
   std::vector<String> tags;
-  String err1, err2;
-  bool ok = fwUpdFetchReleases(tags, err1);
-  if (!ok && bleFallback) {
-    // Manual checks only: retry with BLE torn down to free internal heap for
-    // the TLS handshake. Never done for background checks — a periodic check
-    // must not interrupt BLE (and hour/pay tracking) mid-mow.
-    fwUpdPauseBle();
-    ok = fwUpdFetchReleases(tags, err2);
-    fwUpdResumeBle();
-  }
+  String err1;
+  const bool ok = fwUpdFetchReleases(tags, err1);
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = false;
     gFwUpd.checked = true;
@@ -5359,8 +5358,6 @@ static void fwUpdDoCheck(bool bleFallback) {
     } else {
       gFwUpd.phase = "error";
       gFwUpd.error = err1;
-      if (err2.length() && err2 != err1) gFwUpd.error += "; retry w/o BLE: " + err2;
-      else if (err2.length())            gFwUpd.error += " (also with BLE off)";
     }
     xSemaphoreGive(fwUpdMux);
   }
