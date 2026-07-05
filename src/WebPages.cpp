@@ -1284,7 +1284,10 @@ function watchForReboot() {
 
 if ($('dash-soc') || $('bat-soc-gauge') || $('details')) {
   refreshFull();               // full status once (incl. the static details table)
-  setInterval(refresh, 5000);  // then compact live telemetry only
+  // Poll only while the tab is visible — a backgrounded dashboard shouldn't keep
+  // the ESP32 building status JSON. Refresh immediately on return to the tab.
+  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 }
 if ($('wx-forecast')) {
   refreshWeather();

@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.4.9](docs/releases/v0.4.9.md) | Web-server stability: stream JSON responses instead of one big String; pause dashboard polling when the tab is hidden. |
 | [v0.4.8](docs/releases/v0.4.8.md) | Compact `/api/live` endpoint for the dashboard's recurring poll; static details table loads once — cuts recurring JSON overhead. |
 | [v0.4.7](docs/releases/v0.4.7.md) | Update check no longer tears BLE down (was leaving the web UI unresponsive); on-device GitHub check confirmed memory-bound — use the USB installer. |
 | [v0.4.6](docs/releases/v0.4.6.md) | Fix Maintenance page web-server crash by streaming large web assets and slimming heatmap/hour APIs. |

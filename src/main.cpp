@@ -4526,12 +4526,35 @@ void sendPageP(const String &title, PGM_P body) {
   sendContentPieces(foot);
 }
 
+// Streams serialized JSON to the client in ~512-byte pieces so we never hold
+// the entire response (the ~6 KB /api/status body) as one String. That big
+// per-request allocation, on a heap already fragmented by BLE + LVGL + Wi-Fi,
+// was a prime cause of the web server failing under sustained polling.
+struct JsonChunkStream : public Print {
+  String buf;
+  JsonChunkStream() { buf.reserve(600); }
+  size_t write(uint8_t c) override {
+    buf += static_cast<char>(c);
+    if (buf.length() >= 512) drain();
+    return 1;
+  }
+  size_t write(const uint8_t *data, size_t size) override {
+    buf.concat(reinterpret_cast<const char *>(data), size);
+    if (buf.length() >= 512) drain();
+    return size;
+  }
+  void drain() {
+    if (buf.length()) { server.sendContent(buf); buf = ""; buf.reserve(600); }
+  }
+};
+
 void sendJson(JsonDocument &doc) {
-  String out;
-  out.reserve(measureJson(doc) + 4);
-  serializeJson(doc, out);
   server.sendHeader("Connection", "close");
-  server.send(200, "application/json", out);
+  server.setContentLength(measureJson(doc));
+  server.send(200, "application/json", "");
+  JsonChunkStream stream;
+  serializeJson(doc, stream);
+  stream.drain();
 }
 
 // full=false builds the compact "live" payload for the dashboard's recurring
