@@ -72,7 +72,7 @@ jobs:
           {
             "name": "R48Display",
             "version": "${VER}",
-            "new_install_prompt_erase": false,
+            "new_install_prompt_erase": true,
             "builds": [
               {
                 "chipFamily": "ESP32-S3",
