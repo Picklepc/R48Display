@@ -5496,11 +5496,24 @@ void apiBleScan() {
   const BmsProfile &profile = activeProfile();
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->clearResults();
-  NimBLEScanResults results = scan->getResults(BLE_SCAN_DURATION_MS, false);
+  const uint32_t startedMs = millis();
+  if (!scan->start(BLE_SCAN_DURATION_MS, false, true)) {
+    bleBms.finishManualScan();
+    server.send(503, "application/json",
+                "{\"devices\":[],\"error\":\"BLE scan start failed\"}");
+    return;
+  }
+  while (scan->isScanning() && millis() - startedMs <= BLE_SCAN_TIMEOUT_MS) {
+    delay(10);
+  }
+  const bool timedOut = scan->isScanning();
+  if (timedOut) scan->stop();
+  NimBLEScanResults results = scan->getResults();
   Serial.printf("[BLE] web scan: %d seen (internal heap %u)\n",
                 results.getCount(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   JsonDocument doc;
   doc["seen"] = results.getCount();
+  if (timedOut) doc["error"] = "BLE scan timeout";
   JsonArray devices = doc["devices"].to<JsonArray>();
   for (int i = 0; i < results.getCount(); ++i) {
     const NimBLEAdvertisedDevice *d = results.getDevice(i);
