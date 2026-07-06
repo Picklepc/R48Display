@@ -59,6 +59,11 @@ constexpr float BATTERY_EXTERNAL_RISE_V = 0.050f;
 constexpr int16_t BATTERY_EXTERNAL_FAST_RISE_MV = 80;
 constexpr int16_t BATTERY_EXTERNAL_DROP_MV = -80;
 constexpr uint32_t BLE_SCAN_RETRY_MS = 15000;
+constexpr uint32_t BLE_SCAN_DURATION_MS = 3000;
+constexpr uint32_t BLE_SCAN_TIMEOUT_MS = 9000;
+constexpr uint16_t BLE_SCAN_INTERVAL_MS = 320;
+constexpr uint16_t BLE_SCAN_WINDOW_MS = 40;
+constexpr uint8_t BLE_SCAN_STORED_RESULTS_MAX = 64;
 constexpr uint32_t BLE_POLL_ANALOG_MS = 5000;
 constexpr uint32_t BLE_POLL_ANALOG_IDLE_MS = 60000;
 constexpr uint32_t BLE_POLL_WARNING_MS = 30000;
@@ -726,6 +731,18 @@ bool deviceAdvertisesProfile(const NimBLEAdvertisedDevice *device, const BmsProf
   return device && device->isAdvertisingService(NimBLEUUID(profile.serviceUuid));
 }
 
+bool asciiEqualsIgnoreCase(const char *a, const char *b) {
+  if (!a || !b) return false;
+  while (*a && *b) {
+    const char ca = *a >= 'A' && *a <= 'Z' ? *a + 32 : *a;
+    const char cb = *b >= 'A' && *b <= 'Z' ? *b + 32 : *b;
+    if (ca != cb) return false;
+    ++a;
+    ++b;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
 const BmsProfile *firstCompatibleProfile(const NimBLEAdvertisedDevice *device) {
   if (!device) return nullptr;
   const String name(device->getName().c_str());
@@ -951,7 +968,7 @@ String bmsLinkLabel() {
 class BleBmsClient;
 BleBmsClient *bleClientForNotify = nullptr;
 
-class BleBmsClient {
+class BleBmsClient : public NimBLEScanCallbacks {
   struct PollPolicy {
     BlePolicyMode mode = BlePolicyMode::Full;
     uint32_t analogMs = BLE_POLL_ANALOG_MS;
@@ -967,10 +984,7 @@ class BleBmsClient {
     NimBLEDevice::init(settings.hostname.c_str());
     NimBLEDevice::setPower(3);
     NimBLEScan *scan = NimBLEDevice::getScan();
-    scan->setActiveScan(true);
-    scan->setInterval(160);
-    scan->setWindow(80);
-    scan->setMaxResults(16);
+    configureScannerForAuto(scan);
     bleClientForNotify = this;
     bms.initialized = true;
     bms.status = "BLE ready";
@@ -988,6 +1002,10 @@ class BleBmsClient {
     if (!bms.enabled) return;
     if (!bms.initialized) begin();
     const uint32_t now = millis();
+    if (scanInProgress_) {
+      serviceActiveScan(now);
+      return;
+    }
     if (client_ && bms.connected && !client_->isConnected()) {
       resetClient(false);
       bms.status = "disconnected, rescanning";
@@ -1002,7 +1020,7 @@ class BleBmsClient {
         bms.status = String("BLE sleeping — next check ") + formatCountdown(remaining);
         return;
       }
-      if (now - bms.lastScanMs >= BLE_SCAN_RETRY_MS || bms.lastScanMs == 0) scanAndConnect();
+      if (now - bms.lastScanMs >= BLE_SCAN_RETRY_MS || bms.lastScanMs == 0) startScanAndConnect(now);
       return;
     }
     if (now - lastRssiMs_ > 5000) {
@@ -1055,6 +1073,14 @@ class BleBmsClient {
 
   void pauseForProvisioning() {
     drainNotifyQueue();
+    if (bms.initialized) {
+      NimBLEScan *scan = NimBLEDevice::getScan();
+      if (scan && scan->isScanning()) scan->stop();
+      if (scan) scan->clearResults();
+    }
+    autoScanArmed_ = false;
+    scanInProgress_ = false;
+    scanDone_ = false;
     resetClient(true);
     if (bms.initialized) {
       NimBLEDevice::deinit(true);
@@ -1062,6 +1088,40 @@ class BleBmsClient {
     }
     bms.scanning = false;
     bms.status = "BLE paused for setup AP";
+  }
+
+  bool scanBusy() const {
+    return scanInProgress_;
+  }
+
+  void prepareManualScan() {
+    if (!bms.initialized) begin();
+    configureScannerForStoredResults(NimBLEDevice::getScan());
+  }
+
+  void finishManualScan() {
+    if (bms.initialized) configureScannerForAuto(NimBLEDevice::getScan());
+  }
+
+  void onResult(const NimBLEAdvertisedDevice *device) override {
+    if (!autoScanArmed_ || !device) return;
+    scanSeen_ = static_cast<uint16_t>(scanSeen_ + 1);
+    if (scanMatched_ || !scanDeviceMatchesTarget(device)) return;
+    scanMatchAddress_ = device->getAddress();
+    const std::string name = device->getName();
+    snprintf(scanMatchName_, sizeof(scanMatchName_), "%s", name.c_str());
+    scanMatchRssi_ = device->getRSSI();
+    scanMatched_ = true;
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    if (scan) scan->stop();
+    scanEndReason_ = 0;
+    scanDone_ = true;
+  }
+
+  void onScanEnd(const NimBLEScanResults &, int reason) override {
+    if (!autoScanArmed_) return;
+    scanEndReason_ = reason;
+    scanDone_ = true;
   }
 
   bool readNow() {
@@ -1175,41 +1235,145 @@ class BleBmsClient {
     return deviceAdvertisesProfile(device, profile);
   }
 
-  void scanAndConnect() {
+  void configureScannerForAuto(NimBLEScan *scan) {
+    if (!scan) return;
+    scan->setScanCallbacks(this, false);
+    scan->setActiveScan(true);
+    scan->setInterval(BLE_SCAN_INTERVAL_MS);
+    scan->setWindow(BLE_SCAN_WINDOW_MS);
+    scan->setScanResponseTimeout(250);
+    scan->setMaxResults(0);
+  }
+
+  void configureScannerForStoredResults(NimBLEScan *scan) {
+    if (!scan) return;
+    scan->setScanCallbacks(nullptr, false);
+    scan->setActiveScan(true);
+    scan->setInterval(BLE_SCAN_INTERVAL_MS);
+    scan->setWindow(BLE_SCAN_WINDOW_MS);
+    scan->setScanResponseTimeout(250);
+    scan->setMaxResults(BLE_SCAN_STORED_RESULTS_MAX);
+  }
+
+  bool scanDeviceMatchesTarget(const NimBLEAdvertisedDevice *device) const {
+    if (!device || !scanProfile_) return false;
+    if (scanTarget_[0] != '\0') {
+      const std::string name = device->getName();
+      if (name == scanTarget_) return true;
+      const std::string address = device->getAddress().toString();
+      return asciiEqualsIgnoreCase(address.c_str(), scanTarget_);
+    }
+    return deviceAdvertisesProfile(device, *scanProfile_);
+  }
+
+  void startScanAndConnect(uint32_t now) {
+    if (scanInProgress_) return;
     const BmsProfile &profile = activeProfile();
+    scanProfile_ = &profile;
+    settings.bmsName.toCharArray(scanTarget_, sizeof(scanTarget_));
+    scanTarget_[sizeof(scanTarget_) - 1] = '\0';
+    scanMatchAddress_ = NimBLEAddress();
+    scanMatchName_[0] = '\0';
+    scanMatchRssi_ = 0;
+    scanSeen_ = 0;
+    scanEndReason_ = 0;
+    scanMatched_ = false;
+    scanDone_ = false;
+    autoScanArmed_ = true;
     bms.scanning = true;
     bms.status = settings.bmsName.length() ? "scanning for " + settings.bmsName : "scanning for compatible BMS";
-    bms.lastScanMs = millis();
+    bms.lastScanMs = now;
+    scanStartedMs_ = now;
     NimBLEScan *scan = NimBLEDevice::getScan();
+    configureScannerForAuto(scan);
+    if (scan->isScanning()) scan->stop();
     scan->clearResults();
-    NimBLEScanResults results = scan->getResults(3000, false);
-    Serial.printf("[BLE] BMS scan: %d seen (internal heap %u)\n",
-                  results.getCount(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    const NimBLEAdvertisedDevice *target = nullptr;
-    for (int i = 0; i < results.getCount(); ++i) {
-      const NimBLEAdvertisedDevice *device = results.getDevice(i);
-      if (deviceMatches(device, profile)) {
-        target = device;
-        break;
-      }
+    scanInProgress_ = scan->start(BLE_SCAN_DURATION_MS, false, true);
+    if (!scanInProgress_) {
+      autoScanArmed_ = false;
+      scanDone_ = false;
+      bms.scanning = false;
+      bms.errors++;
+      bms.status = "BLE scan start failed";
+      bms.lastError = "NimBLE scan start returned false";
+      Serial.printf("[BLE] BMS scan start failed (internal heap %u)\n",
+                    heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
-    if (target) {
-      bms.found = true;
-      bms.address = String(target->getAddress().toString().c_str());
-      bms.name = String(target->getName().c_str());
-      bms.rssi = target->getRSSI();
-      connectToTarget(target, profile);
+  }
+
+  void serviceActiveScan(uint32_t now) {
+    if (scanDone_) {
+      finishScanAndConnect();
+      return;
+    }
+    if (now - scanStartedMs_ <= BLE_SCAN_TIMEOUT_MS) return;
+
+    Serial.printf("[BLE] BMS scan timeout after %lu ms; seen=%u, heap=%u\n",
+                  static_cast<unsigned long>(now - scanStartedMs_),
+                  static_cast<unsigned>(scanSeen_),
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    if (scan && scan->isScanning()) scan->stop();
+    if (scan) scan->clearResults();
+    scanInProgress_ = false;
+    autoScanArmed_ = false;
+    scanDone_ = false;
+    bms.scanning = false;
+    bms.connected = false;
+    bms.authenticated = false;
+    bms.errors++;
+    bms.status = "BLE scan timeout; reset BLE";
+    bms.lastError = "NimBLE scan did not finish";
+    resetBleStack();
+  }
+
+  void finishScanAndConnect() {
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    const bool matched = scanMatched_;
+    const uint16_t seen = scanSeen_;
+    const int reason = scanEndReason_;
+    BmsProfile profile = scanProfile_ ? *scanProfile_ : activeProfile();
+    scanInProgress_ = false;
+    autoScanArmed_ = false;
+    scanDone_ = false;
+    bms.scanning = false;
+    if (scan) scan->clearResults();
+    Serial.printf("[BLE] BMS scan end: seen=%u, match=%s, reason=%d, heap=%u\n",
+                  static_cast<unsigned>(seen),
+                  matched ? "yes" : "no",
+                  reason,
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    if (matched) {
+      connectToTarget(scanMatchAddress_, profile, scanMatchName_, scanMatchRssi_);
     } else {
       bms.status = "compatible BMS not found";
       bms.lastError = settings.bmsName.length() ? "target not found in scan" : "no advertised compatible service";
     }
-    scan->clearResults();
-    bms.scanning = false;
+  }
+
+  void resetBleStack() {
+    resetClient(true);
+    NimBLEDevice::deinit(true);
+    bms.initialized = false;
+    bms.connected = false;
+    bms.authenticated = false;
+    delay(50);
+    begin();
   }
 
   void connectToTarget(const NimBLEAdvertisedDevice *device, const BmsProfile &profile) {
+    if (!device) return;
+    const std::string name = device->getName();
+    connectToTarget(device->getAddress(), profile, name.c_str(), device->getRSSI());
+  }
+
+  void connectToTarget(const NimBLEAddress &address, const BmsProfile &profile, const char *name, int8_t rssi) {
     resetClient(false);
     bms.status = "connecting BLE";
+    bms.found = true;
+    bms.address = String(address.toString().c_str());
+    bms.name = name && name[0] ? String(name) : bms.address;
+    bms.rssi = rssi;
     client_ = NimBLEDevice::createClient();
     if (!client_) {
       bms.errors++;
@@ -1218,7 +1382,7 @@ class BleBmsClient {
     }
     client_->setConnectTimeout(8000);
     client_->setConnectionParams(24, 48, 0, 500);
-    if (!client_->connect(device)) {
+    if (!client_->connect(address)) {
       bms.errors++;
       bms.lastError = "BLE connect failed";
       resetClient(false);
@@ -1849,6 +2013,18 @@ class BleBmsClient {
   NimBLERemoteCharacteristic *notifyChar_ = nullptr;
   NimBLERemoteCharacteristic *writeChar_ = nullptr;
   NimBLERemoteCharacteristic *authChar_ = nullptr;
+  const BmsProfile *scanProfile_ = nullptr;
+  NimBLEAddress scanMatchAddress_;
+  char scanTarget_[64] = "";
+  char scanMatchName_[64] = "";
+  volatile bool autoScanArmed_ = false;
+  volatile bool scanInProgress_ = false;
+  volatile bool scanDone_ = false;
+  volatile bool scanMatched_ = false;
+  volatile uint16_t scanSeen_ = 0;
+  volatile int scanEndReason_ = 0;
+  int8_t scanMatchRssi_ = 0;
+  uint32_t scanStartedMs_ = 0;
   uint8_t rxBuffer_[512]{};
   size_t rxLen_ = 0;
   uint32_t lastRssiMs_ = 0;
@@ -5311,11 +5487,16 @@ void apiBleScan() {
                 "{\"devices\":[],\"error\":\"BLE scan disabled while setup AP is active\"}");
     return;
   }
-  if (!bms.initialized) bleBms.begin();
+  if (bleBms.scanBusy()) {
+    server.send(409, "application/json",
+                "{\"devices\":[],\"error\":\"automatic BMS scan in progress\"}");
+    return;
+  }
+  bleBms.prepareManualScan();
   const BmsProfile &profile = activeProfile();
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->clearResults();
-  NimBLEScanResults results = scan->getResults(3000, false);
+  NimBLEScanResults results = scan->getResults(BLE_SCAN_DURATION_MS, false);
   Serial.printf("[BLE] web scan: %d seen (internal heap %u)\n",
                 results.getCount(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   JsonDocument doc;
@@ -5338,6 +5519,7 @@ void apiBleScan() {
     }
   }
   scan->clearResults();
+  bleBms.finishManualScan();
   sendJson(doc);
 }
 
@@ -5934,6 +6116,7 @@ void setup() {
   updateScreenBattery();
   R48Mic::begin(settings.featureMic, settings.micRunThreshold);
   WiFi.onEvent(onWiFiEvent);
+  if (!setupButtonHeld && !settings.wifiSsid.isEmpty() && bms.enabled) bleBms.begin();
   setupWiFi(setupButtonHeld);
   if (WiFi.status() == WL_CONNECTED) configureClock();
   setupOta();
