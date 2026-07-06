@@ -52,11 +52,14 @@ jobs:
         run: |
           mkdir -p _site/bin
           cp installer/index.html _site/index.html
-          TAGS=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=12" --jq '.[].tag_name')
-          # "Latest" for the default install is the newest STABLE release. The
-          # /releases/latest endpoint excludes pre-releases (e.g. v0.5.0a1), so an
-          # alpha still lists in the dropdown but never becomes the public default.
-          LATEST=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          # One call gives tags + prerelease flags. "Latest" for the default
+          # install is the newest STABLE (non-prerelease) release, picked from
+          # this same list. A separate /releases/latest call races the release
+          # that just published — which is exactly when this deploy fires — and
+          # can return empty, wrongly falling back to the just-cut alpha.
+          RELJSON=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=12")
+          TAGS=$(echo "$RELJSON" | jq -r '.[].tag_name')
+          LATEST=$(echo "$RELJSON" | jq -r 'map(select(.prerelease==false)) | .[0].tag_name // empty')
           [ -n "$LATEST" ] || LATEST=$(echo "$TAGS" | head -1)
           LIST=""
           for TAG in $TAGS; do
