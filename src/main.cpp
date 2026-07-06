@@ -468,6 +468,10 @@ bool displayManualOff = false;
 bool ntpConfigured = false;
 bool pendingStaStart = false;
 bool pendingProvisioningStart = false;
+// True only while validating freshly-entered Wi-Fi credentials. Gates the
+// automatic fall-back to the setup AP so that a device which has already
+// connected (or booted with saved creds) never abandons STA on a transient drop.
+bool staProvisionTrial = false;
 uint8_t ioExpanderOutput = 0x07;
 uint8_t displayPage = 0;
 uint32_t lastWifiAttemptMs = 0;
@@ -958,6 +962,7 @@ class BleBmsClient {
  public:
   void begin() {
     if (bms.initialized) return;
+    const uint32_t heapBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     NimBLEDevice::init(settings.hostname.c_str());
     NimBLEDevice::setPower(3);
     NimBLEScan *scan = NimBLEDevice::getScan();
@@ -968,6 +973,13 @@ class BleBmsClient {
     bleClientForNotify = this;
     bms.initialized = true;
     bms.status = "BLE ready";
+    // Core-3 diagnostics: if the controller can't allocate internal RAM the
+    // stack comes up but scans return nothing. The delta shows how much internal
+    // heap NimBLE init actually consumed — a healthy init costs tens of KB, so a
+    // near-zero delta means the controller didn't come up.
+    const uint32_t heapAfter = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    Serial.printf("[BLE] init: internal heap %u -> %u (NimBLE used %d bytes)\n",
+                  heapBefore, heapAfter, (int)heapBefore - (int)heapAfter);
   }
 
   void loop() {
@@ -1170,6 +1182,8 @@ class BleBmsClient {
     NimBLEScan *scan = NimBLEDevice::getScan();
     scan->clearResults();
     NimBLEScanResults results = scan->getResults(3000, false);
+    Serial.printf("[BLE] BMS scan: %d seen (internal heap %u)\n",
+                  results.getCount(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     const NimBLEAdvertisedDevice *target = nullptr;
     for (int i = 0; i < results.getCount(); ++i) {
       const NimBLEAdvertisedDevice *device = results.getDevice(i);
@@ -4366,9 +4380,23 @@ void maintainWiFi() {
   if (provisioningActive) return;
   const wl_status_t wifiStatus = WiFi.status();
   const uint32_t now = millis();
-  if (!settings.wifiSsid.isEmpty() && wifiStatus != WL_CONNECTED) {
+  // Count a valid DHCP lease as "up" too: on arduino-esp32 3.x WiFi.status()
+  // can briefly read non-connected right after the AP->STA handoff even though
+  // the link is established, which previously tripped the fallback below and
+  // bounced a working device back to the setup AP.
+  const bool staLinkUp = wifiStatus == WL_CONNECTED || WiFi.localIP()[0] != 0;
+  if (staLinkUp) {
+    wifiDisconnectedSinceMs = 0;
+    staProvisionTrial = false;   // credentials proven good — stop trialing
+  }
+  if (!settings.wifiSsid.isEmpty() && !staLinkUp) {
     if (wifiDisconnectedSinceMs == 0) wifiDisconnectedSinceMs = now;
-    if (now - wifiDisconnectedSinceMs > WIFI_SETUP_AP_FALLBACK_MS) {
+    // Only bounce back to the setup AP while VALIDATING freshly-entered
+    // credentials that have never connected. Once connected — or when booting
+    // with saved creds — keep retrying STA through transient drops instead of
+    // forcing the user to reconfigure over the AP.
+    if (staProvisionTrial && now - wifiDisconnectedSinceMs > WIFI_SETUP_AP_FALLBACK_MS) {
+      staProvisionTrial = false;
       startProvisioningAp();
       drawDisplay(true);
       return;
@@ -4377,9 +4405,6 @@ void maintainWiFi() {
       WiFi.begin(settings.wifiSsid.c_str(), settings.wifiPassword.c_str());
       lastWifiAttemptMs = now;
     }
-  }
-  if (wifiStatus == WL_CONNECTED) {
-    wifiDisconnectedSinceMs = 0;
   }
   if (wifiStatus == WL_CONNECTED && !mdnsReady) {
     if (MDNS.begin(settings.hostname.c_str())) {
@@ -5136,6 +5161,7 @@ void apiSettingsPost() {
       (provisioningActive || wifiPasswordTouched || oldSsid != settings.wifiSsid ||
        oldWifiPassword != settings.wifiPassword)) {
     pendingStaStart = true;
+    staProvisionTrial = true;   // new creds — allow one AP fallback if they fail
   }
   setupMqtt();
   drawDisplay(true);
@@ -5256,7 +5282,10 @@ void apiBleScan() {
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->clearResults();
   NimBLEScanResults results = scan->getResults(3000, false);
+  Serial.printf("[BLE] web scan: %d seen (internal heap %u)\n",
+                results.getCount(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   JsonDocument doc;
+  doc["seen"] = results.getCount();
   JsonArray devices = doc["devices"].to<JsonArray>();
   for (int i = 0; i < results.getCount(); ++i) {
     const NimBLEAdvertisedDevice *d = results.getDevice(i);
