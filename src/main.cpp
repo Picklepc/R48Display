@@ -471,7 +471,8 @@ bool pendingProvisioningStart = false;
 // True only while validating freshly-entered Wi-Fi credentials. Gates the
 // automatic fall-back to the setup AP so that a device which has already
 // connected (or booted with saved creds) never abandons STA on a transient drop.
-bool staProvisionTrial = false;
+// Cleared from the Wi-Fi event task on GOT_IP, so it is volatile.
+volatile bool staProvisionTrial = false;
 uint8_t ioExpanderOutput = 0x07;
 uint8_t displayPage = 0;
 uint32_t lastWifiAttemptMs = 0;
@@ -4016,6 +4017,18 @@ uint32_t displayRefreshIntervalMs() {
 
 void syncWifiPowerSave() {
   if (WiFi.getMode() != WIFI_STA || WiFi.status() != WL_CONNECTED) return;
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  // On arduino-esp32 3.x, WIFI_PS_MAX_MODEM alongside BLE coexistence starves the
+  // STA of beacons and drops the link after the idle window — which was bouncing
+  // the device back to the setup AP about a minute after it connected. Hold at
+  // MIN_MODEM (the mode the stable first minute already ran at). 2.x tolerated
+  // MAX_MODEM, so it keeps the original adaptive behavior below.
+  static bool wifiPsPinned = false;
+  if (!wifiPsPinned) {
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    wifiPsPinned = true;
+  }
+#else
   static bool wifiMaxPs = false;
   const bool wantMax = lastWebRequestMs == 0 || millis() - lastWebRequestMs > 60000UL;
   if (wantMax && !wifiMaxPs) {
@@ -4025,6 +4038,7 @@ void syncWifiPowerSave() {
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     wifiMaxPs = false;
   }
+#endif
 }
 
 void syncCpuFrequency() {
@@ -4299,6 +4313,25 @@ void redirectToCaptivePortal() {
   server.send(302, "text/plain", "Setup portal");
 }
 
+// Wi-Fi event logging + a reliable "connected" latch. Polling WiFi.status() can
+// miss a short-lived connection, so we clear the provisioning trial here instead:
+// once the device actually gets an IP it must never bounce back to the setup AP.
+// The disconnect reason code makes any remaining drop diagnosable over USB serial.
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      staProvisionTrial = false;
+      Serial.printf("[WiFi] STA got IP %s\n", WiFi.localIP().toString().c_str());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.printf("[WiFi] STA disconnected (reason %u)\n",
+                    info.wifi_sta_disconnected.reason);
+      break;
+    default:
+      break;
+  }
+}
+
 void startProvisioningAp() {
   bleBms.pauseForProvisioning();
   stopCaptiveDns();
@@ -4344,6 +4377,7 @@ void startStaOnly() {
   stopCaptiveDns();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
   WiFi.setSleep(true);
   esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
@@ -5899,6 +5933,7 @@ void setup() {
   analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
   updateScreenBattery();
   R48Mic::begin(settings.featureMic, settings.micRunThreshold);
+  WiFi.onEvent(onWiFiEvent);
   setupWiFi(setupButtonHeld);
   if (WiFi.status() == WL_CONNECTED) configureClock();
   setupOta();

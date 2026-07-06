@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.5.0a7](docs/releases/v0.5.0a7.md) | **Alpha (pre-release)** — fixes the core-3 Wi-Fi drop: `WIFI_PS_MAX_MODEM` + BLE coexistence was dropping the STA link ~1 min after connecting (idle power-save), bouncing to the setup AP. Now holds `MIN_MODEM` on core 3, latches connection on the got-IP event, and logs Wi-Fi events over serial. Should also restore BLE (paused only while the AP is up). |
 | [v0.5.0a6](docs/releases/v0.5.0a6.md) | **Alpha (pre-release)** — Wi-Fi stops reverting to the setup AP after a successful STA connect (latches on a DHCP lease; AP fallback now only for never-connected new credentials); adds USB-serial BLE diagnostics to trace why no devices are seen. |
 | [v0.5.0a5](docs/releases/v0.5.0a5.md) | **Alpha (pre-release)** — setup AP compatibility pass for arduino-esp32 3.x: remove `softAPConfig`, isolate BLE, and lower setup AP TX power after start. |
 | [v0.5.0a4](docs/releases/v0.5.0a4.md) | **Alpha (pre-release)** — setup AP recovery hardening: open fallback AP, explicit 192.168.4.1 config, and BLE paused while provisioning. |
