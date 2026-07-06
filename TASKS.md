@@ -511,7 +511,7 @@ provide alongside Wi-Fi + BLE + LVGL, and the framework's TLS buffers can't be
 shrunk from the app. arduino-esp32 3.x exposes `WiFiClientSecure::setBufferSizes()`,
 letting us cap the TLS buffers to fit. This is the payoff of the migration.
 
-**Status (v0.5.0a1, alpha):** the framework migration builds clean on the branch
+**Status (v0.5.0a2, alpha):** the framework migration builds clean on the branch
 `0.5.x-core3` and is cut as a **pre-release** for hardware testing — M5.0-01…04
 are done. On-device update checks stay disabled until M5.0-05; the first install
 must be over USB (M5.0-07).
