@@ -40,8 +40,9 @@ constexpr uint16_t COLOR_GREEN = 0x07E0;
 constexpr uint16_t COLOR_YELLOW = 0xFFE0;
 
 constexpr uint32_t WIFI_RETRY_MS = 30000;
-constexpr uint32_t WIFI_SETUP_AP_FALLBACK_MS = 90000;
+constexpr uint32_t WIFI_SETUP_AP_FALLBACK_MS = 30000;
 constexpr uint16_t CAPTIVE_DNS_PORT = 53;
+constexpr uint8_t SETUP_AP_CHANNEL = 1;
 constexpr uint32_t DISPLAY_REFRESH_MS = 2500;
 constexpr uint32_t DISPLAY_CLOCK_REFRESH_MS = 1000;
 constexpr uint32_t DISPLAY_SLEEP_IDLE_MS = 300000;
@@ -458,6 +459,7 @@ String apSsid;
 bool displayReady = false;
 bool touchReady = false;
 bool provisioningActive = false;
+bool provisioningApOpen = false;
 bool captiveDnsActive = false;
 bool mdnsReady = false;
 bool displaySleeping = false;
@@ -1035,6 +1037,13 @@ class BleBmsClient {
     resetClient(true);
     bms.lastScanMs = 0;
     bms.status = "manual reconnect";
+  }
+
+  void pauseForProvisioning() {
+    drainNotifyQueue();
+    resetClient(true);
+    bms.scanning = false;
+    bms.status = "BLE paused for setup AP";
   }
 
   bool readNow() {
@@ -4272,13 +4281,35 @@ void redirectToCaptivePortal() {
 }
 
 void startProvisioningAp() {
+  bleBms.pauseForProvisioning();
+  stopCaptiveDns();
   WiFi.disconnect(false, false);
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_AP);
+  WiFi.persistent(false);
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
+  const IPAddress apIp(192, 168, 4, 1);
+  const IPAddress apSubnet(255, 255, 255, 0);
+  WiFi.softAPConfig(apIp, apIp, apSubnet);
   apSsid = "R48Display-" + chipSuffix();
-  provisioningActive = WiFi.softAP(apSsid.c_str(), settings.apPassword.c_str(), 6, false, 4);
+  provisioningApOpen = true;
+  provisioningActive = WiFi.softAP(apSsid.c_str(), static_cast<const char *>(nullptr),
+                                   SETUP_AP_CHANNEL, false, 4);
+  if (!provisioningActive && settings.apPassword.length() >= 8) {
+    provisioningApOpen = false;
+    provisioningActive = WiFi.softAP(apSsid.c_str(), settings.apPassword.c_str(),
+                                     SETUP_AP_CHANNEL, false, 4);
+  }
+  if (provisioningActive) {
+    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    Serial.printf("Setup AP active: %s (%s), IP %s\n",
+                  apSsid.c_str(), provisioningApOpen ? "open" : "password",
+                  WiFi.softAPIP().toString().c_str());
+  } else {
+    provisioningApOpen = false;
+    Serial.println(F("Setup AP failed to start"));
+  }
   if (provisioningActive) startCaptiveDns();
   else stopCaptiveDns();
   wifiDisconnectedSinceMs = millis();
@@ -4287,6 +4318,7 @@ void startProvisioningAp() {
 
 void startStaOnly() {
   provisioningActive = false;
+  provisioningApOpen = false;
   stopCaptiveDns();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
@@ -4305,8 +4337,6 @@ void startStaOnly() {
 void setupWiFi(bool forceProvisioning) {
   apSsid = "R48Display-" + chipSuffix();
   WiFi.persistent(false);
-  WiFi.setSleep(true);
-  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
   WiFi.setHostname(settings.hostname.c_str());
   if (forceProvisioning || settings.wifiSsid.isEmpty()) startProvisioningAp();
   else startStaOnly();
@@ -4431,6 +4461,7 @@ void drawDisplay(bool fullRedraw) {
   s.use24h = settings.timeFormat == "24h";
   s.powerSaveEnabled = settings.powerSaveEnabled;
   s.apPassword = settings.apPassword;
+  s.apOpen = provisioningApOpen;
   s.advertiseApCreds = settings.advertiseApCredentials;
   s.animType = settings.animType <= 15 ? settings.animType : activeTheme().animType;
   s.animEnabled = settings.animEnabled;
@@ -5858,7 +5889,7 @@ void loop() {
   ArduinoOTA.handle();
   maintainWiFi();
   bleLoopBusy = true;                   // set BEFORE the check — see fwUpdPauseBle
-  if (!fwUpdateActive) bleBms.loop();   // BLE stack is torn down during a self-update
+  if (!fwUpdateActive && !provisioningActive) bleBms.loop();  // keep setup AP radio stable
   bleLoopBusy = false;
   updateSocRate();
   updateDegradation();

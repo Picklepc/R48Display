@@ -58,6 +58,7 @@ struct Snapshot {
   bool use24h = false;
   bool powerSaveEnabled = false;
   String apPassword;
+  bool apOpen = false;
   bool advertiseApCreds = true;
   uint8_t animType = 0;
   bool animEnabled = true;

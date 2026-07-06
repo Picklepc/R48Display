@@ -526,7 +526,8 @@ void updateStatus(const Snapshot &s) {
     if (s.advertiseApCreds) {
       const uint8_t step = static_cast<uint8_t>((millis() / 4000) % 3);
       if (step == 0) setText(w.metric[8], String("Wi-Fi: ") + s.ssid);
-      else if (step == 1) setText(w.metric[8], String("Pass: ") + s.apPassword);
+      else if (!s.apOpen && step == 1) setText(w.metric[8], String("Pass: ") + s.apPassword);
+      else if (s.apOpen && step == 1) setText(w.metric[8], "Open network - no password");
       else setText(w.metric[8], "Open 192.168.4.1 to set up");
     } else {
       setText(w.metric[8], "Open 192.168.4.1 to set up");
