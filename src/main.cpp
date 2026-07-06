@@ -43,6 +43,7 @@ constexpr uint32_t WIFI_RETRY_MS = 30000;
 constexpr uint32_t WIFI_SETUP_AP_FALLBACK_MS = 30000;
 constexpr uint16_t CAPTIVE_DNS_PORT = 53;
 constexpr uint8_t SETUP_AP_CHANNEL = 1;
+constexpr wifi_power_t SETUP_AP_TX_POWER = WIFI_POWER_8_5dBm;
 constexpr uint32_t DISPLAY_REFRESH_MS = 2500;
 constexpr uint32_t DISPLAY_CLOCK_REFRESH_MS = 1000;
 constexpr uint32_t DISPLAY_SLEEP_IDLE_MS = 300000;
@@ -1042,6 +1043,10 @@ class BleBmsClient {
   void pauseForProvisioning() {
     drainNotifyQueue();
     resetClient(true);
+    if (bms.initialized) {
+      NimBLEDevice::deinit(true);
+      bms.initialized = false;
+    }
     bms.scanning = false;
     bms.status = "BLE paused for setup AP";
   }
@@ -4283,15 +4288,17 @@ void redirectToCaptivePortal() {
 void startProvisioningAp() {
   bleBms.pauseForProvisioning();
   stopCaptiveDns();
-  WiFi.disconnect(false, false);
-  WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_AP);
   WiFi.persistent(false);
+  WiFi.disconnect(false, false);
+  delay(50);
+  WiFi.softAPdisconnect(true);
+  delay(50);
+  WiFi.mode(WIFI_OFF);
+  delay(150);
+  WiFi.mode(WIFI_AP);
+  delay(150);
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
-  const IPAddress apIp(192, 168, 4, 1);
-  const IPAddress apSubnet(255, 255, 255, 0);
-  WiFi.softAPConfig(apIp, apIp, apSubnet);
   apSsid = "R48Display-" + chipSuffix();
   provisioningApOpen = true;
   provisioningActive = WiFi.softAP(apSsid.c_str(), static_cast<const char *>(nullptr),
@@ -4302,7 +4309,8 @@ void startProvisioningAp() {
                                      SETUP_AP_CHANNEL, false, 4);
   }
   if (provisioningActive) {
-    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    delay(200);
+    WiFi.setTxPower(SETUP_AP_TX_POWER);
     Serial.printf("Setup AP active: %s (%s), IP %s\n",
                   apSsid.c_str(), provisioningApOpen ? "open" : "password",
                   WiFi.softAPIP().toString().c_str());
@@ -5183,10 +5191,23 @@ void apiUsageCategories() {
 
 void apiWifiScan() {
   const wifi_mode_t oldMode = WiFi.getMode();
+  const bool keepSetupAp = provisioningActive;
+  if (keepSetupAp && oldMode == WIFI_AP) {
+    WiFi.mode(WIFI_AP_STA);
+    delay(100);
+    WiFi.disconnect(false, false);
+    WiFi.setSleep(false);
+    WiFi.setTxPower(SETUP_AP_TX_POWER);
+  }
   const int count = WiFi.scanNetworks(false, true);
   if (count < 0) {
     WiFi.scanDelete();
-    if (oldMode == WIFI_AP) WiFi.mode(WIFI_AP);
+    if (keepSetupAp) {
+      WiFi.setSleep(false);
+      WiFi.setTxPower(SETUP_AP_TX_POWER);
+    } else if (oldMode == WIFI_AP) {
+      WiFi.mode(WIFI_AP);
+    }
     server.send(503, "application/json", "{\"networks\":[],\"error\":\"wifi scan failed\"}");
     return;
   }
@@ -5201,7 +5222,12 @@ void apiWifiScan() {
     obj["secure"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
   }
   WiFi.scanDelete();
-  if (oldMode == WIFI_AP) WiFi.mode(WIFI_AP);
+  if (keepSetupAp) {
+    WiFi.setSleep(false);
+    WiFi.setTxPower(SETUP_AP_TX_POWER);
+  } else if (oldMode == WIFI_AP) {
+    WiFi.mode(WIFI_AP);
+  }
   sendJson(doc);
 }
 
@@ -5220,6 +5246,11 @@ void apiProvisioningStart() {
 }
 
 void apiBleScan() {
+  if (provisioningActive) {
+    server.send(409, "application/json",
+                "{\"devices\":[],\"error\":\"BLE scan disabled while setup AP is active\"}");
+    return;
+  }
   if (!bms.initialized) bleBms.begin();
   const BmsProfile &profile = activeProfile();
   NimBLEScan *scan = NimBLEDevice::getScan();
@@ -5350,7 +5381,7 @@ static void fwUpdPauseBle() {
 }
 
 static void fwUpdResumeBle() {
-  bleBms.begin();
+  if (!provisioningActive) bleBms.begin();
   fwUpdateActive = false;
 }
 
@@ -5839,7 +5870,6 @@ void setup() {
   analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
   updateScreenBattery();
   R48Mic::begin(settings.featureMic, settings.micRunThreshold);
-  bleBms.begin();
   setupWiFi(setupButtonHeld);
   if (WiFi.status() == WL_CONNECTED) configureClock();
   setupOta();

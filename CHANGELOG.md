@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.5.0a5](docs/releases/v0.5.0a5.md) | **Alpha (pre-release)** — setup AP compatibility pass for arduino-esp32 3.x: remove `softAPConfig`, isolate BLE, and lower setup AP TX power after start. |
 | [v0.5.0a4](docs/releases/v0.5.0a4.md) | **Alpha (pre-release)** — setup AP recovery hardening: open fallback AP, explicit 192.168.4.1 config, and BLE paused while provisioning. |
 | [v0.5.0a3](docs/releases/v0.5.0a3.md) | **Alpha (pre-release)** — installer erase prompt/data-preservation fix plus setup AP recovery and captive-portal redirect. |
 | [v0.5.0a2](docs/releases/v0.5.0a2.md) | **Alpha (pre-release)** — first build on arduino-esp32 3.x / ESP-IDF 5.x; install over USB. Same features as v0.4.10; groundwork for on-device updates that fit the device's memory. |
