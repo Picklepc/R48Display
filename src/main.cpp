@@ -5470,6 +5470,7 @@ void apiUpdateStatus() {
   JsonDocument doc;
   doc["current"] = FIRMWARE_VERSION;
   doc["auto"]    = settings.autoUpdateCheck;
+  doc["on_device"] = fwUpdTaskHandle != nullptr;  // false on 2.x builds (task not started)
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, pdMS_TO_TICKS(200)) == pdTRUE) {
     doc["checked"]   = gFwUpd.checked;
     doc["latest"]    = gFwUpd.latestVersion;
@@ -5757,9 +5758,16 @@ void setup() {
   setupOta();
   setupRoutes();
   weatherMux = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(weatherTask, "weather", 12288, nullptr, 1, &weatherTaskHandle, 0);
+  xTaskCreatePinnedToCore(weatherTask, "weather", 8192, nullptr, 1, &weatherTaskHandle, 0);
   fwUpdMux = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(fwUpdTask, "fwupd", 16384, nullptr, 1, &fwUpdTaskHandle, 0);
+  // The self-update task is NOT started on this (arduino-esp32 2.x) build: its
+  // TLS handshake needs ~16 KB of contiguous internal RAM this device can't
+  // supply, so the check always failed AND its attempts churned/fragmented the
+  // heap enough to knock the web server over. Not creating it reclaims a 16 KB
+  // stack (roughly doubling free internal heap) and removes that destabilizer.
+  // On-device updates return in 0.5.0 (arduino-esp32 3.x + setBufferSizes);
+  // until then use the USB web installer. fwUpdTaskHandle stays null and the
+  // update endpoints report unavailable.
   drawDisplay(true);
   Serial.printf("WiFi mode: %s\n", provisioningActive ? "setup AP" : "STA");
   Serial.printf("Touch %s\n", touchReady ? "ready" : "missing");

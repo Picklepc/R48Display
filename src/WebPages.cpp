@@ -1176,6 +1176,14 @@ let _fwupdPoll = null;
 function renderUpdateStatus(s) {
   const cur = $('fwupd-current'); if (cur) cur.textContent = 'v' + s.current;
   const auto = $('autoUpdCb'); if (auto) auto.checked = !!s.auto;
+  // On-device checks disabled on this build (memory) — point to the installer.
+  if (s.on_device === false) {
+    ['fwupd-check','fwupd-install','fwupd-pick','autoUpdCb'].forEach(id => { const e = $(id); if (e) e.style.display = 'none'; });
+    const st = $('fwupd-status');
+    if (st) st.innerHTML = "On-device update checks are off on this build to keep the web UI stable. Update over USB at <a href='https://picklepc.github.io/R48Display/' target='_blank'>picklepc.github.io/R48Display</a>, or use Manual upload below.";
+    const lt = $('fwupd-latest'); if (lt) lt.textContent = '';
+    return;
+  }
   const latest = $('fwupd-latest');
   const status = $('fwupd-status');
   const install = $('fwupd-install');
