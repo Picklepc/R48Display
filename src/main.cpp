@@ -5775,7 +5775,21 @@ void setup() {
   // freezing until a power-cycle. 30 s clears every legitimate long operation
   // (blocking Wi-Fi scan ~10 s, BLE scan 3 s); the manual firmware upload feeds
   // the WDT per received chunk. Rollback protection makes a WDT reboot safe.
-  esp_task_wdt_init(30, true);
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  // arduino-esp32 3.x / IDF 5.x replaced esp_task_wdt_init(timeout, panic) with a
+  // config struct, and the TWDT may already be running (CONFIG_ESP_TASK_WDT_INIT),
+  // in which case init returns ESP_ERR_INVALID_STATE and we reconfigure instead.
+  esp_task_wdt_config_t wdtConfig = {
+      .timeout_ms = 30000,
+      .idle_core_mask = 0,
+      .trigger_panic = true,
+  };
+  if (esp_task_wdt_init(&wdtConfig) == ESP_ERR_INVALID_STATE) {
+    esp_task_wdt_reconfigure(&wdtConfig);
+  }
+#else
+  esp_task_wdt_init(30, true);  // arduino-esp32 2.x: (timeout_s, panic)
+#endif
   enableLoopWDT();
   // Boot reached a healthy state — confirm this OTA image so the bootloader
   // won't roll it back. (No-op when not booting a pending OTA image.)

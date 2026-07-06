@@ -511,11 +511,16 @@ provide alongside Wi-Fi + BLE + LVGL, and the framework's TLS buffers can't be
 shrunk from the app. arduino-esp32 3.x exposes `WiFiClientSecure::setBufferSizes()`,
 letting us cap the TLS buffers to fit. This is the payoff of the migration.
 
-- [ ] **M5.0-01** Bump `platform` in `platformio.ini` to a build providing arduino-esp32 3.x (IDF 5.x); confirm `waveshare_esp32_s3_touch_lcd_1_85` board + OPI PSRAM (`qio_opi`) support.
-- [ ] **M5.0-02** Triage build breaks (2.x→3.x API): WiFi/WiFiClientSecure, HTTPClient/HTTPUpdate/Update, WebServer, Preferences, `analogSetPinAttenuation`, `heap_caps_malloc_extmem_enable`, ArduinoOTA, ledc.
-- [ ] **M5.0-03** Confirm library compat on the new core: NimBLE-Arduino 2.5.0, LVGL 8.4.0, GFX 1.6.0, PubSubClient, ArduinoJson 7.
-- [ ] **M5.0-04** Confirm OTA rollback still works: the `verifyRollbackLater()` weak-hook + `esp_ota_mark_app_valid_cancel_rollback()` path must still exist in the 3.x core (verify in `esp32-hal-misc.c`); confirm `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`.
-- [ ] **M5.0-05** THE PAYOFF: add `client.setBufferSizes(rx, tx)` (small rx, ~4–8 KB) to the update check (`fwUpdFetchInstallerIndex`) and the `httpUpdate` download; restore the BLE-free path if still helpful; re-verify on hardware that the check + version picker + self-update actually succeed. Capture free-heap/largest-block before & after.
+**Status (v0.5.0a1, alpha):** the framework migration builds clean on the branch
+`0.5.x-core3` and is cut as a **pre-release** for hardware testing — M5.0-01…04
+are done. On-device update checks stay disabled until M5.0-05; the first install
+must be over USB (M5.0-07).
+
+- [x] **M5.0-01** ✅ Bumped `platform` to pioarduino `55.03.39` (arduino-esp32 3.x / IDF 5.x); `waveshare_esp32_s3_touch_lcd_1_85` board + OPI PSRAM (`qio_opi`) build clean (RAM 56.7%, Flash 42.7%).
+- [x] **M5.0-02** ✅ Build breaks fixed: loop watchdog → 3.x `esp_task_wdt_config_t` struct API (with `esp_task_wdt_reconfigure` fallback when the TWDT is already running); `ADC_11db`, `ledc`, and ArduinoOTA verified against the 3.x core. Full build is green.
+- [x] **M5.0-03** ✅ Libraries compile on 3.x: NimBLE 2.5.0, LVGL 8.4.0, PubSubClient, ArduinoJson 7; **GFX bumped 1.6.0 → 1.6.6** (1.6.0's `spiFrequencyToClockDiv` call broke against the 3.x SPI signature). Mic still uses the legacy `driver/i2s.h`, which ships as a deprecated compat header on IDF 5.x (compiles with warnings) — port to `i2s_std.h` deferred.
+- [x] **M5.0-04** ✅ Rollback path intact on 3.x: `verifyRollbackLater()` weak hook + `esp_ota_mark_app_valid_cancel_rollback()` confirmed present in the 3.x `esp32-hal-misc.c`. Runtime rollback re-checked on hardware in M5.0-06.
+- [ ] **M5.0-05** THE PAYOFF (next): re-enable the update task and cap the TLS buffers so the handshake fits. **Confirm the 3.x API first** — a header grep did not find `setBufferSizes`; the secure client is `NetworkClientSecure` on 3.x and the real memory win may instead be IDF 5.x's dynamic mbedTLS buffers. Wire into `fwUpdFetchInstallerIndex` + `httpUpdate`; restore the BLE-free path if still helpful; capture free-heap/largest-block before & after on hardware.
 - [ ] **M5.0-06** Feature-retention checklist on hardware: LVGL pages + touch nav, BMS BLE for all profiles, MQTT/HA discovery, weather, maintenance/pay/heatmap, multi-tier hours + pause reasons, power-save/shutdown (GPIO 6/7), wrong-file upload guard, web installer USB flash.
 - [ ] **M5.0-07** Bootloader/partition: 3.x ships an IDF 5.x bootloader. OTA replaces only the app slot, NOT the bootloader — so the FIRST 3.x install should be a USB merged flash (bootloader+partitions+app). Test whether a 2.x→3.x OTA boots (it's rollback-protected, so safe to try); document the required path. Partition **table** is unchanged (ours, in `partitions.csv`), so no repartition.
 - [ ] **M5.0-08** Regression pass; cut as v0.5.0 with clear "USB flash required to move to 0.5.x" upgrade note if M5.0-07 shows OTA can't cross the bootloader gap.

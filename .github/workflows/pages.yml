@@ -53,6 +53,11 @@ jobs:
           mkdir -p _site/bin
           cp installer/index.html _site/index.html
           TAGS=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=12" --jq '.[].tag_name')
+          # "Latest" for the default install is the newest STABLE release. The
+          # /releases/latest endpoint excludes pre-releases (e.g. v0.5.0a1), so an
+          # alpha still lists in the dropdown but never becomes the public default.
+          LATEST=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          [ -n "$LATEST" ] || LATEST=$(echo "$TAGS" | head -1)
           LIST=""
           for TAG in $TAGS; do
             # installer offers v0.3.6 and newer only
@@ -75,10 +80,12 @@ jobs:
             ]
           }
           EOF
-            LIST="${LIST}{\"tag\":\"${TAG}\",\"version\":\"${VER}\"},"
+            ENTRY="{\"tag\":\"${TAG}\",\"version\":\"${VER}\"},"
+            # Keep the default (latest stable) first so the installer selects and
+            # labels it "(latest)"; everything else follows in newest-first order.
+            if [ "$TAG" = "$LATEST" ]; then LIST="${ENTRY}${LIST}"; else LIST="${LIST}${ENTRY}"; fi
           done
           echo "{\"versions\":[${LIST%,}]}" > _site/versions.json
-          LATEST=$(echo "$TAGS" | head -1)
           cp "_site/bin/${LATEST}.bin" _site/firmware.bin
           cp "_site/manifest-${LATEST}.json" _site/manifest.json
           echo "Assembled: $(cat _site/versions.json)"
