@@ -4526,12 +4526,35 @@ void sendPageP(const String &title, PGM_P body) {
   sendContentPieces(foot);
 }
 
+// Streams serialized JSON to the client in ~512-byte pieces so we never hold
+// the entire response (the ~6 KB /api/status body) as one String. That big
+// per-request allocation, on a heap already fragmented by BLE + LVGL + Wi-Fi,
+// was a prime cause of the web server failing under sustained polling.
+struct JsonChunkStream : public Print {
+  String buf;
+  JsonChunkStream() { buf.reserve(600); }
+  size_t write(uint8_t c) override {
+    buf += static_cast<char>(c);
+    if (buf.length() >= 512) drain();
+    return 1;
+  }
+  size_t write(const uint8_t *data, size_t size) override {
+    buf.concat(reinterpret_cast<const char *>(data), size);
+    if (buf.length() >= 512) drain();
+    return size;
+  }
+  void drain() {
+    if (buf.length()) { server.sendContent(buf); buf = ""; buf.reserve(600); }
+  }
+};
+
 void sendJson(JsonDocument &doc) {
-  String out;
-  out.reserve(measureJson(doc) + 4);
-  serializeJson(doc, out);
   server.sendHeader("Connection", "close");
-  server.send(200, "application/json", out);
+  server.setContentLength(measureJson(doc));
+  server.send(200, "application/json", "");
+  JsonChunkStream stream;
+  serializeJson(doc, stream);
+  stream.drain();
 }
 
 // full=false builds the compact "live" payload for the dashboard's recurring
@@ -5447,6 +5470,7 @@ void apiUpdateStatus() {
   JsonDocument doc;
   doc["current"] = FIRMWARE_VERSION;
   doc["auto"]    = settings.autoUpdateCheck;
+  doc["on_device"] = fwUpdTaskHandle != nullptr;  // false on 2.x builds (task not started)
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, pdMS_TO_TICKS(200)) == pdTRUE) {
     doc["checked"]   = gFwUpd.checked;
     doc["latest"]    = gFwUpd.latestVersion;
@@ -5734,9 +5758,16 @@ void setup() {
   setupOta();
   setupRoutes();
   weatherMux = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(weatherTask, "weather", 12288, nullptr, 1, &weatherTaskHandle, 0);
+  xTaskCreatePinnedToCore(weatherTask, "weather", 8192, nullptr, 1, &weatherTaskHandle, 0);
   fwUpdMux = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(fwUpdTask, "fwupd", 16384, nullptr, 1, &fwUpdTaskHandle, 0);
+  // The self-update task is NOT started on this (arduino-esp32 2.x) build: its
+  // TLS handshake needs ~16 KB of contiguous internal RAM this device can't
+  // supply, so the check always failed AND its attempts churned/fragmented the
+  // heap enough to knock the web server over. Not creating it reclaims a 16 KB
+  // stack (roughly doubling free internal heap) and removes that destabilizer.
+  // On-device updates return in 0.5.0 (arduino-esp32 3.x + setBufferSizes);
+  // until then use the USB web installer. fwUpdTaskHandle stays null and the
+  // update endpoints report unavailable.
   drawDisplay(true);
   Serial.printf("WiFi mode: %s\n", provisioningActive ? "setup AP" : "STA");
   Serial.printf("Touch %s\n", touchReady ? "ready" : "missing");

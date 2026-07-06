@@ -1176,6 +1176,14 @@ let _fwupdPoll = null;
 function renderUpdateStatus(s) {
   const cur = $('fwupd-current'); if (cur) cur.textContent = 'v' + s.current;
   const auto = $('autoUpdCb'); if (auto) auto.checked = !!s.auto;
+  // On-device checks disabled on this build (memory) — point to the installer.
+  if (s.on_device === false) {
+    ['fwupd-check','fwupd-install','fwupd-pick','autoUpdCb'].forEach(id => { const e = $(id); if (e) e.style.display = 'none'; });
+    const st = $('fwupd-status');
+    if (st) st.innerHTML = "On-device update checks are off on this build to keep the web UI stable. Update over USB at <a href='https://picklepc.github.io/R48Display/' target='_blank'>picklepc.github.io/R48Display</a>, or use Manual upload below.";
+    const lt = $('fwupd-latest'); if (lt) lt.textContent = '';
+    return;
+  }
   const latest = $('fwupd-latest');
   const status = $('fwupd-status');
   const install = $('fwupd-install');
@@ -1284,7 +1292,10 @@ function watchForReboot() {
 
 if ($('dash-soc') || $('bat-soc-gauge') || $('details')) {
   refreshFull();               // full status once (incl. the static details table)
-  setInterval(refresh, 5000);  // then compact live telemetry only
+  // Poll only while the tab is visible — a backgrounded dashboard shouldn't keep
+  // the ESP32 building status JSON. Refresh immediately on return to the tab.
+  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 }
 if ($('wx-forecast')) {
   refreshWeather();
