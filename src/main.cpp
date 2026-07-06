@@ -3,6 +3,7 @@
 #include <map>
 #include <vector>
 #include <ArduinoOTA.h>
+#include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <Update.h>
@@ -39,6 +40,8 @@ constexpr uint16_t COLOR_GREEN = 0x07E0;
 constexpr uint16_t COLOR_YELLOW = 0xFFE0;
 
 constexpr uint32_t WIFI_RETRY_MS = 30000;
+constexpr uint32_t WIFI_SETUP_AP_FALLBACK_MS = 90000;
+constexpr uint16_t CAPTIVE_DNS_PORT = 53;
 constexpr uint32_t DISPLAY_REFRESH_MS = 2500;
 constexpr uint32_t DISPLAY_CLOCK_REFRESH_MS = 1000;
 constexpr uint32_t DISPLAY_SLEEP_IDLE_MS = 300000;
@@ -441,6 +444,7 @@ static SemaphoreHandle_t weatherMux = nullptr;
 static TaskHandle_t weatherTaskHandle = nullptr;
 
 MqttClient mqttClient;
+DNSServer captiveDns;
 BatterySample screenBattery;
 float screenBatteryBootVolts = 0.0f;
 float screenBatteryLowVolts = 0.0f;
@@ -454,6 +458,7 @@ String apSsid;
 bool displayReady = false;
 bool touchReady = false;
 bool provisioningActive = false;
+bool captiveDnsActive = false;
 bool mdnsReady = false;
 bool displaySleeping = false;
 bool displayManualOff = false;
@@ -463,6 +468,7 @@ bool pendingProvisioningStart = false;
 uint8_t ioExpanderOutput = 0x07;
 uint8_t displayPage = 0;
 uint32_t lastWifiAttemptMs = 0;
+uint32_t wifiDisconnectedSinceMs = 0;
 uint32_t lastDisplayMs = 0;
 uint32_t lastWebRequestMs = 0;
 uint32_t lastBatteryMs = 0;
@@ -4242,19 +4248,46 @@ void configureClock() {
   }
 }
 
+String captivePortalUrl() {
+  return String("http://") + WiFi.softAPIP().toString() + "/";
+}
+
+void stopCaptiveDns() {
+  if (!captiveDnsActive) return;
+  captiveDns.stop();
+  captiveDnsActive = false;
+}
+
+void startCaptiveDns() {
+  stopCaptiveDns();
+  captiveDns.setTTL(60);
+  captiveDns.setErrorReplyCode(DNSReplyCode::NoError);
+  captiveDnsActive = captiveDns.start(CAPTIVE_DNS_PORT, "*", WiFi.softAPIP());
+}
+
+void redirectToCaptivePortal() {
+  server.sendHeader("Location", captivePortalUrl(), true);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(302, "text/plain", "Setup portal");
+}
+
 void startProvisioningAp() {
   WiFi.disconnect(false, false);
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_AP);
-  WiFi.setSleep(true);
-  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+  WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
   apSsid = "R48Display-" + chipSuffix();
-  provisioningActive = WiFi.softAP(apSsid.c_str(), settings.apPassword.c_str(), 6, false, 2);
+  provisioningActive = WiFi.softAP(apSsid.c_str(), settings.apPassword.c_str(), 6, false, 4);
+  if (provisioningActive) startCaptiveDns();
+  else stopCaptiveDns();
+  wifiDisconnectedSinceMs = millis();
   mdnsReady = false;
 }
 
 void startStaOnly() {
   provisioningActive = false;
+  stopCaptiveDns();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
@@ -4264,6 +4297,7 @@ void startStaOnly() {
   if (!settings.wifiSsid.isEmpty()) {
     WiFi.begin(settings.wifiSsid.c_str(), settings.wifiPassword.c_str());
     lastWifiAttemptMs = millis();
+    wifiDisconnectedSinceMs = lastWifiAttemptMs;
   }
   mdnsReady = false;
 }
@@ -4292,12 +4326,24 @@ void maintainWiFi() {
     return;
   }
   if (provisioningActive) return;
-  if (!settings.wifiSsid.isEmpty() && WiFi.status() != WL_CONNECTED &&
-      millis() - lastWifiAttemptMs > WIFI_RETRY_MS) {
-    WiFi.begin(settings.wifiSsid.c_str(), settings.wifiPassword.c_str());
-    lastWifiAttemptMs = millis();
+  const wl_status_t wifiStatus = WiFi.status();
+  const uint32_t now = millis();
+  if (!settings.wifiSsid.isEmpty() && wifiStatus != WL_CONNECTED) {
+    if (wifiDisconnectedSinceMs == 0) wifiDisconnectedSinceMs = now;
+    if (now - wifiDisconnectedSinceMs > WIFI_SETUP_AP_FALLBACK_MS) {
+      startProvisioningAp();
+      drawDisplay(true);
+      return;
+    }
+    if (now - lastWifiAttemptMs > WIFI_RETRY_MS) {
+      WiFi.begin(settings.wifiSsid.c_str(), settings.wifiPassword.c_str());
+      lastWifiAttemptMs = now;
+    }
   }
-  if (WiFi.status() == WL_CONNECTED && !mdnsReady) {
+  if (wifiStatus == WL_CONNECTED) {
+    wifiDisconnectedSinceMs = 0;
+  }
+  if (wifiStatus == WL_CONNECTED && !mdnsReady) {
     if (MDNS.begin(settings.hostname.c_str())) {
       MDNS.addService("http", "tcp", 80);
       mdnsReady = true;
@@ -4929,6 +4975,7 @@ void apiSettingsPost() {
   const String oldBms = settings.bmsName;
   const String oldProto = settings.bmsProtocol;
   const String oldSsid = settings.wifiSsid;
+  const String oldWifiPassword = settings.wifiPassword;
   const uint16_t oldRotation = settings.displayRotation;
   const String oldUsage = settings.usageCategory;
   const String oldTimezone = settings.timezone;
@@ -5045,7 +5092,12 @@ void apiSettingsPost() {
     configureClock();
   }
   if (oldBms != settings.bmsName || oldProto != settings.bmsProtocol) bleBms.reconnect();
-  if (oldSsid != settings.wifiSsid && !settings.wifiSsid.isEmpty()) pendingStaStart = true;
+  const bool wifiPasswordTouched = server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0;
+  if (!settings.wifiSsid.isEmpty() &&
+      (provisioningActive || wifiPasswordTouched || oldSsid != settings.wifiSsid ||
+       oldWifiPassword != settings.wifiPassword)) {
+    pendingStaStart = true;
+  }
   setupMqtt();
   drawDisplay(true);
   server.send(200, "application/json", "{\"ok\":true}");
@@ -5668,6 +5720,10 @@ void setupRoutes() {
   server.on("/api/update/check",  HTTP_POST, guarded(apiUpdateCheck));
   server.on("/api/update/apply",  HTTP_POST, guarded(apiUpdateApply));
   server.onNotFound([]() {
+    if (provisioningActive) {
+      redirectToCaptivePortal();
+      return;
+    }
     server.sendHeader("Location", "/", true);
     server.send(302, "text/plain", "");
   });
@@ -5797,6 +5853,7 @@ void setup() {
 }
 
 void loop() {
+  if (captiveDnsActive) captiveDns.processNextRequest();
   server.handleClient();
   ArduinoOTA.handle();
   maintainWiFi();

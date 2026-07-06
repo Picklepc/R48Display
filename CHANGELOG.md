@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.5.0a3](docs/releases/v0.5.0a3.md) | **Alpha (pre-release)** — installer erase prompt/data-preservation fix plus setup AP recovery and captive-portal redirect. |
 | [v0.5.0a2](docs/releases/v0.5.0a2.md) | **Alpha (pre-release)** — first build on arduino-esp32 3.x / ESP-IDF 5.x; install over USB. Same features as v0.4.10; groundwork for on-device updates that fit the device's memory. |
 | [v0.4.10](docs/releases/v0.4.10.md) | Web stability: stop the non-working on-device update checker (reclaims its 16 KB stack, ~doubling free RAM, and removes the heap churn that wedged the web server). |
 | [v0.4.9](docs/releases/v0.4.9.md) | Web-server stability: stream JSON responses instead of one big String; pause dashboard polling when the tab is hidden. |
