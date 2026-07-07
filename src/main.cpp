@@ -63,7 +63,7 @@ constexpr uint32_t BLE_SCAN_DURATION_MS = 6000;
 constexpr uint32_t BLE_SCAN_TIMEOUT_MS = 9000;
 constexpr uint16_t BLE_SCAN_INTERVAL_MS = 160;
 constexpr uint16_t BLE_SCAN_WINDOW_MS = 80;
-constexpr uint8_t BLE_SCAN_STORED_RESULTS_MAX = 32;
+constexpr uint8_t BLE_SCAN_STORED_RESULTS_MAX = 64;
 constexpr uint8_t BLE_SCAN_TIMEOUTS_BEFORE_PAUSE = 3;
 constexpr uint32_t BLE_TIMEOUT_COOLDOWN_MS = 300000UL;
 constexpr uint32_t BLE_STA_STABILIZE_MS = 45000UL;
@@ -167,9 +167,6 @@ constexpr BmsProfile BMS_PROFILES[] = {
      BMS_BLE_SERVICE_UUID, BMS_BLE_NOTIFY_UUID, BMS_BLE_WRITE_UUID, nullptr, nullptr, false,
      BmsParser::Daly},
 };
-constexpr size_t BMS_PROFILE_COUNT = sizeof(BMS_PROFILES) / sizeof(BMS_PROFILES[0]);
-constexpr uint8_t BLE_MANUAL_SCAN_RESULT_MAX = 24;
-constexpr uint8_t BLE_MANUAL_SCAN_PROFILE_MAX = static_cast<uint8_t>(BMS_PROFILE_COUNT);
 
 constexpr ThemeProfile THEME_PROFILES[] = {
     {"chlorophyll_shift", "Chlorophyll Shift", "green",
@@ -401,46 +398,6 @@ struct BmsBleData {
   uint8_t balanceState = 0;
 };
 
-struct BleScanDeviceSnapshot {
-  char name[64]{};
-  char address[24]{};
-  int rssi = 0;
-  bool compatible = false;
-  char recommendedProfile[32]{};
-  char recommendedLabel[64]{};
-  uint8_t compatibleCount = 0;
-  char compatibleProfiles[BLE_MANUAL_SCAN_PROFILE_MAX][32]{};
-};
-
-struct BleManualScanSnapshot {
-  bool busy = false;
-  uint32_t jobId = 0;
-  uint32_t startedMs = 0;
-  uint32_t finishedMs = 0;
-  uint16_t seen = 0;
-  uint8_t count = 0;
-  bool timedOut = false;
-  bool startFailed = false;
-  char error[96]{};
-  BleScanDeviceSnapshot devices[BLE_MANUAL_SCAN_RESULT_MAX]{};
-};
-
-enum class BleWorkerCommandType : uint8_t {
-  ManualScan,
-  Reconnect,
-  ReadNow,
-  PauseProvisioning,
-  PauseUpdate,
-  ResumeUpdate,
-};
-
-struct BleWorkerCommand {
-  BleWorkerCommandType type = BleWorkerCommandType::Reconnect;
-  uint32_t jobId = 0;
-  bool *boolResult = nullptr;
-  TaskHandle_t waiter = nullptr;
-};
-
 struct TouchPoint {
   uint16_t x = 0;
   uint16_t y = 0;
@@ -504,19 +461,6 @@ float screenBatteryLowVolts = 0.0f;
 uint8_t screenBatteryRiseSamples = 0;
 bool screenBatteryExternalLatched = false;
 BmsBleData bms;
-static BleManualScanSnapshot gBleManualScan;
-static BleManualScanSnapshot gBleManualScanScratch;
-static SemaphoreHandle_t bleManualScanMux = nullptr;
-static QueueHandle_t bleWorkerQueue = nullptr;
-static TaskHandle_t bleWorkerTaskHandle = nullptr;
-static volatile bool fwUpdateActive = false;
-static volatile bool bleWorkerBusy = false;
-static volatile uint32_t bleWorkerLoops = 0;
-static volatile uint32_t bleWorkerLastLoopMs = 0;
-static volatile uint32_t bleWorkerMaxLoopMs = 0;
-static volatile uint32_t bleWorkerLastCommandMs = 0;
-static volatile uint32_t bleWorkerStackMinWords = 0;
-static uint32_t bleManualScanNextJob = 0;
 
 String internalI2cAddresses;
 String touchI2cAddresses;
@@ -591,12 +535,6 @@ void sendJson(JsonDocument &doc);
 void startStaOnly();
 void startProvisioningAp();
 void configureClock();
-void startBleWorker();
-void requestBleReconnect();
-bool requestBleReadNow(uint32_t timeoutMs = 12000);
-bool pauseBleForProvisioning(uint32_t timeoutMs = 9000);
-bool startManualBleScan();
-void sendManualBleScanJson();
 
 String chipSuffix() {
   char suffix[7];
@@ -822,12 +760,6 @@ bool asciiEqualsIgnoreCase(const char *a, const char *b) {
     ++b;
   }
   return *a == '\0' && *b == '\0';
-}
-
-void copyCString(char *dst, size_t dstLen, const char *src) {
-  if (!dst || dstLen == 0) return;
-  if (!src) src = "";
-  snprintf(dst, dstLen, "%s", src);
 }
 
 bool profileNameHintMatches(const String &name, const BmsProfile &profile) {
@@ -1207,97 +1139,22 @@ class BleBmsClient : public NimBLEScanCallbacks {
   }
 
   void pauseForProvisioning() {
-    pauseRadio("BLE paused for setup AP");
-  }
-
-  void pauseForUpdate() {
-    pauseRadio("paused for update");
-  }
-
-  void resumeAfterUpdate() {
-    if (!provisioningActive && !bms.initialized) begin();
-  }
-
-  bool runManualScan(BleManualScanSnapshot &out) {
-    memset(&out, 0, sizeof(out));
-    out.startedMs = millis();
-    if (provisioningActive) {
-      copyCString(out.error, sizeof(out.error), "BLE scan disabled while setup AP is active");
-      out.finishedMs = millis();
-      return false;
+    drainNotifyQueue();
+    if (bms.initialized) {
+      NimBLEScan *scan = NimBLEDevice::getScan();
+      if (scan && scan->isScanning()) scan->stop();
+      if (scan) scan->clearResults();
     }
-    if (!settings.wifiSsid.isEmpty()) {
-      if (WiFi.status() != WL_CONNECTED || staConnectedSinceMs == 0) {
-        copyCString(out.error, sizeof(out.error), "BLE waiting for STA");
-        out.finishedMs = millis();
-        return false;
-      }
-      const uint32_t staAgeMs = millis() - staConnectedSinceMs;
-      if (staAgeMs < BLE_STA_STABILIZE_MS) {
-        const String err = "BLE waiting for WiFi " + formatCountdown(BLE_STA_STABILIZE_MS - staAgeMs);
-        copyCString(out.error, sizeof(out.error), err.c_str());
-        out.finishedMs = millis();
-        return false;
-      }
+    autoScanArmed_ = false;
+    scanInProgress_ = false;
+    scanDone_ = false;
+    resetClient(true);
+    if (bms.initialized) {
+      NimBLEDevice::deinit(true);
+      bms.initialized = false;
     }
-
-    prepareManualScan();
-    const BmsProfile &profile = activeProfile();
-    NimBLEScan *scan = NimBLEDevice::getScan();
-    if (!scan) {
-      copyCString(out.error, sizeof(out.error), "BLE scanner unavailable");
-      finishManualScan();
-      out.finishedMs = millis();
-      return false;
-    }
-
-    scan->clearResults();
-    const uint32_t startedMs = millis();
-    if (!scan->start(BLE_SCAN_DURATION_MS, false, true)) {
-      out.startFailed = true;
-      copyCString(out.error, sizeof(out.error), "BLE scan start failed");
-      finishManualScan();
-      out.finishedMs = millis();
-      return false;
-    }
-    while (scan->isScanning() && millis() - startedMs <= BLE_SCAN_TIMEOUT_MS) {
-      drainNotifyQueue();
-      vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    out.timedOut = scan->isScanning();
-    if (out.timedOut) scan->stop();
-    NimBLEScanResults results = scan->getResults();
-    out.seen = static_cast<uint16_t>(min<int>(results.getCount(), 0xFFFF));
-    for (int i = 0; i < results.getCount() && out.count < BLE_MANUAL_SCAN_RESULT_MAX; ++i) {
-      const NimBLEAdvertisedDevice *d = results.getDevice(i);
-      if (!d) continue;
-      BleScanDeviceSnapshot &item = out.devices[out.count++];
-      copyCString(item.name, sizeof(item.name), d->getName().c_str());
-      copyCString(item.address, sizeof(item.address), d->getAddress().toString().c_str());
-      item.rssi = d->getRSSI();
-      item.compatible = deviceLooksCompatible(d, profile);
-      const BmsProfile *recommended = firstCompatibleProfile(d);
-      copyCString(item.recommendedProfile, sizeof(item.recommendedProfile), recommended ? recommended->id : "");
-      copyCString(item.recommendedLabel, sizeof(item.recommendedLabel), recommended ? recommended->label : "");
-      for (const auto &candidate : BMS_PROFILES) {
-        if (item.compatibleCount >= BLE_MANUAL_SCAN_PROFILE_MAX) break;
-        if (deviceLooksCompatible(d, candidate)) {
-          copyCString(item.compatibleProfiles[item.compatibleCount],
-                      sizeof(item.compatibleProfiles[item.compatibleCount]),
-                      candidate.id);
-          item.compatibleCount++;
-        }
-      }
-    }
-    if (out.timedOut) copyCString(out.error, sizeof(out.error), "BLE scan timeout");
-    scan->clearResults();
-    finishManualScan();
-    out.finishedMs = millis();
-    Serial.printf("[BLE] web scan worker: %u/%u stored (internal heap %u)\n",
-                  static_cast<unsigned>(out.count),
-                  static_cast<unsigned>(out.seen),
-                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    return !out.startFailed && !out.timedOut;
+    bms.scanning = false;
+    bms.status = "BLE paused for setup AP";
   }
 
   bool scanBusy() const {
@@ -1374,25 +1231,6 @@ class BleBmsClient : public NimBLEScanCallbacks {
 
  private:
   static constexpr size_t NOTIFY_QUEUE_SIZE = 1024;
-
-  void pauseRadio(const char *status) {
-    drainNotifyQueue();
-    if (bms.initialized) {
-      NimBLEScan *scan = NimBLEDevice::getScan();
-      if (scan && scan->isScanning()) scan->stop();
-      if (scan) scan->clearResults();
-    }
-    autoScanArmed_ = false;
-    scanInProgress_ = false;
-    scanDone_ = false;
-    resetClient(true);
-    if (bms.initialized) {
-      NimBLEDevice::deinit(true);
-      bms.initialized = false;
-    }
-    bms.scanning = false;
-    bms.status = status;
-  }
 
   PollPolicy currentPolicy() const {
     PollPolicy policy;
@@ -2292,200 +2130,6 @@ class BleBmsClient : public NimBLEScanCallbacks {
 };
 
 BleBmsClient bleBms;
-
-static bool queueBleCommand(BleWorkerCommand &cmd, uint32_t queueTimeoutMs) {
-  if (!bleWorkerQueue) return false;
-  return xQueueSend(bleWorkerQueue, &cmd, pdMS_TO_TICKS(queueTimeoutMs)) == pdTRUE;
-}
-
-static bool sendBleCommand(BleWorkerCommandType type, bool wait, uint32_t timeoutMs,
-                           bool *boolResult = nullptr, uint32_t jobId = 0) {
-  if (!bleWorkerQueue) return !wait;
-  BleWorkerCommand cmd;
-  cmd.type = type;
-  cmd.jobId = jobId;
-  cmd.boolResult = boolResult;
-  cmd.waiter = wait ? xTaskGetCurrentTaskHandle() : nullptr;
-  if (wait) {
-    while (ulTaskNotifyTake(pdTRUE, 0) > 0) {}
-  }
-  if (!queueBleCommand(cmd, 100)) return false;
-  if (!wait) return true;
-  return ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeoutMs)) > 0;
-}
-
-static void finishBleCommand(const BleWorkerCommand &cmd) {
-  if (cmd.waiter) xTaskNotifyGive(cmd.waiter);
-}
-
-static void setManualScanError(uint32_t jobId, const char *error) {
-  if (!bleManualScanMux) return;
-  if (xSemaphoreTake(bleManualScanMux, pdMS_TO_TICKS(250)) != pdTRUE) return;
-  if (jobId == 0 || gBleManualScan.jobId == jobId) {
-    gBleManualScan.busy = false;
-    gBleManualScan.finishedMs = millis();
-    gBleManualScan.startFailed = true;
-    copyCString(gBleManualScan.error, sizeof(gBleManualScan.error), error);
-  }
-  xSemaphoreGive(bleManualScanMux);
-}
-
-static void runBleWorkerCommand(const BleWorkerCommand &cmd) {
-  bleWorkerBusy = true;
-  bleWorkerLastCommandMs = millis();
-  switch (cmd.type) {
-    case BleWorkerCommandType::ManualScan:
-      gBleManualScanScratch.jobId = cmd.jobId;
-      bleBms.runManualScan(gBleManualScanScratch);
-      gBleManualScanScratch.jobId = cmd.jobId;
-      gBleManualScanScratch.busy = false;
-      if (bleManualScanMux && xSemaphoreTake(bleManualScanMux, pdMS_TO_TICKS(500)) == pdTRUE) {
-        if (gBleManualScan.jobId == cmd.jobId) gBleManualScan = gBleManualScanScratch;
-        xSemaphoreGive(bleManualScanMux);
-      }
-      break;
-    case BleWorkerCommandType::Reconnect:
-      bleBms.reconnect();
-      break;
-    case BleWorkerCommandType::ReadNow:
-      if (cmd.boolResult) *cmd.boolResult = bleBms.readNow();
-      break;
-    case BleWorkerCommandType::PauseProvisioning:
-      bleBms.pauseForProvisioning();
-      break;
-    case BleWorkerCommandType::PauseUpdate:
-      bleBms.pauseForUpdate();
-      break;
-    case BleWorkerCommandType::ResumeUpdate:
-      bleBms.resumeAfterUpdate();
-      break;
-  }
-  bleWorkerBusy = false;
-  finishBleCommand(cmd);
-}
-
-static void bleWorkerTask(void *) {
-  Serial.printf("[BLE] worker task started on core %d\n", xPortGetCoreID());
-  for (;;) {
-    BleWorkerCommand cmd;
-    while (xQueueReceive(bleWorkerQueue, &cmd, 0) == pdTRUE) {
-      runBleWorkerCommand(cmd);
-    }
-    if (!fwUpdateActive && !provisioningActive) {
-      const uint32_t startedMs = millis();
-      bleWorkerBusy = true;
-      bleBms.loop();
-      bleWorkerBusy = false;
-      const uint32_t elapsedMs = millis() - startedMs;
-      if (elapsedMs > bleWorkerMaxLoopMs) bleWorkerMaxLoopMs = elapsedMs;
-    }
-    bleWorkerLoops++;
-    bleWorkerLastLoopMs = millis();
-    bleWorkerStackMinWords = uxTaskGetStackHighWaterMark(nullptr);
-    vTaskDelay(pdMS_TO_TICKS(20));
-  }
-}
-
-void startBleWorker() {
-  if (bleWorkerTaskHandle) return;
-  if (!bleManualScanMux) bleManualScanMux = xSemaphoreCreateMutex();
-  if (!bleWorkerQueue) bleWorkerQueue = xQueueCreate(8, sizeof(BleWorkerCommand));
-  if (!bleManualScanMux || !bleWorkerQueue) {
-    Serial.println(F("[BLE] worker not started: queue/mutex allocation failed"));
-    return;
-  }
-  const BaseType_t ok = xTaskCreatePinnedToCore(
-      bleWorkerTask, "ble", 8192, nullptr, 1, &bleWorkerTaskHandle, 1);
-  if (ok != pdPASS) {
-    bleWorkerTaskHandle = nullptr;
-    Serial.println(F("[BLE] worker task creation failed"));
-  }
-}
-
-void requestBleReconnect() {
-  if (!sendBleCommand(BleWorkerCommandType::Reconnect, false, 0)) {
-    bms.lastError = "BLE worker queue unavailable";
-  }
-}
-
-bool requestBleReadNow(uint32_t timeoutMs) {
-  bool ok = false;
-  if (!sendBleCommand(BleWorkerCommandType::ReadNow, true, timeoutMs, &ok)) {
-    bms.lastError = "BLE read request timed out";
-    return false;
-  }
-  return ok;
-}
-
-bool pauseBleForProvisioning(uint32_t timeoutMs) {
-  if (!bleWorkerQueue) return true;
-  return sendBleCommand(BleWorkerCommandType::PauseProvisioning, true, timeoutMs);
-}
-
-bool startManualBleScan() {
-  if (provisioningActive) return false;
-  if (!bleWorkerQueue || !bleManualScanMux) {
-    setManualScanError(0, "BLE worker unavailable");
-    return false;
-  }
-  uint32_t jobId = 0;
-  if (xSemaphoreTake(bleManualScanMux, pdMS_TO_TICKS(250)) != pdTRUE) return false;
-  if (gBleManualScan.busy) {
-    xSemaphoreGive(bleManualScanMux);
-    return true;
-  }
-  jobId = ++bleManualScanNextJob;
-  memset(&gBleManualScan, 0, sizeof(gBleManualScan));
-  gBleManualScan.busy = true;
-  gBleManualScan.jobId = jobId;
-  gBleManualScan.startedMs = millis();
-  xSemaphoreGive(bleManualScanMux);
-
-  BleWorkerCommand cmd;
-  cmd.type = BleWorkerCommandType::ManualScan;
-  cmd.jobId = jobId;
-  if (!queueBleCommand(cmd, 100)) {
-    setManualScanError(jobId, "BLE worker queue full");
-    return false;
-  }
-  return true;
-}
-
-void sendManualBleScanJson() {
-  JsonDocument doc;
-  if (!bleManualScanMux || xSemaphoreTake(bleManualScanMux, pdMS_TO_TICKS(250)) != pdTRUE) {
-    doc["scanning"] = false;
-    doc["error"] = "BLE scan state unavailable";
-    JsonArray devices = doc["devices"].to<JsonArray>();
-    (void)devices;
-    sendJson(doc);
-    return;
-  }
-
-  doc["scanning"] = gBleManualScan.busy;
-  doc["job"] = gBleManualScan.jobId;
-  doc["seen"] = gBleManualScan.seen;
-  doc["stored"] = gBleManualScan.count;
-  doc["started_age_ms"] = millisAge(gBleManualScan.startedMs);
-  doc["finished_age_ms"] = millisAge(gBleManualScan.finishedMs);
-  doc["timed_out"] = gBleManualScan.timedOut;
-  if (gBleManualScan.error[0]) doc["error"] = gBleManualScan.error;
-  JsonArray devices = doc["devices"].to<JsonArray>();
-  for (uint8_t i = 0; i < gBleManualScan.count; ++i) {
-    const BleScanDeviceSnapshot &d = gBleManualScan.devices[i];
-    JsonObject obj = devices.add<JsonObject>();
-    obj["name"] = d.name;
-    obj["address"] = d.address;
-    obj["rssi"] = d.rssi;
-    obj["compatible"] = d.compatible;
-    obj["recommended_profile"] = d.recommendedProfile;
-    obj["recommended_label"] = d.recommendedLabel;
-    JsonArray profileIds = obj["compatible_profiles"].to<JsonArray>();
-    for (uint8_t p = 0; p < d.compatibleCount; ++p) profileIds.add(d.compatibleProfiles[p]);
-  }
-  xSemaphoreGive(bleManualScanMux);
-  sendJson(doc);
-}
 
 // ── MQTT helpers ─────────────────────────────────────────────────────────────
 
@@ -4960,7 +4604,7 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 }
 
 void startProvisioningAp() {
-  pauseBleForProvisioning();
+  bleBms.pauseForProvisioning();
   stopCaptiveDns();
   WiFi.persistent(false);
   WiFi.disconnect(false, false);
@@ -5459,22 +5103,6 @@ void addStatusJson(JsonDocument &doc, bool full = true) {
   b["frames"] = bms.frames;
   b["bytes"] = bms.bytes;
   b["errors"] = bms.errors;
-  b["worker_running"] = bleWorkerTaskHandle != nullptr;
-  b["worker_busy"] = bleWorkerBusy;
-  b["worker_loops"] = bleWorkerLoops;
-  b["worker_last_loop_age"] = millisAge(bleWorkerLastLoopMs);
-  b["worker_max_loop_ms"] = bleWorkerMaxLoopMs;
-  b["worker_stack_min_words"] = bleWorkerStackMinWords;
-  b["worker_last_command_age"] = millisAge(bleWorkerLastCommandMs);
-  if (bleManualScanMux && xSemaphoreTake(bleManualScanMux, pdMS_TO_TICKS(25)) == pdTRUE) {
-    JsonObject manualScan = b["manual_scan"].to<JsonObject>();
-    manualScan["busy"] = gBleManualScan.busy;
-    manualScan["job"] = gBleManualScan.jobId;
-    manualScan["seen"] = gBleManualScan.seen;
-    manualScan["stored"] = gBleManualScan.count;
-    manualScan["error"] = gBleManualScan.error;
-    xSemaphoreGive(bleManualScanMux);
-  }
   b["last_analog_age"] = millisAge(bms.lastAnalogMs);
   b["last_rx_age"] = millisAge(bms.lastRxMs);
   b["last_connect_age"] = millisAge(bms.lastConnectMs);
@@ -5835,7 +5463,7 @@ void apiSettingsPost() {
     ntpConfigured = false;
     configureClock();
   }
-  if (oldBms != settings.bmsName || oldProto != settings.bmsProtocol) requestBleReconnect();
+  if (oldBms != settings.bmsName || oldProto != settings.bmsProtocol) bleBms.reconnect();
   const bool wifiPasswordTouched = server.hasArg("wifi_password") && server.arg("wifi_password").length() > 0;
   if (!settings.wifiSsid.isEmpty() &&
       (provisioningActive || wifiPasswordTouched || oldSsid != settings.wifiSsid ||
@@ -5957,22 +5585,57 @@ void apiBleScan() {
                 "{\"devices\":[],\"error\":\"BLE scan disabled while setup AP is active\"}");
     return;
   }
-  const bool pollOnly = server.hasArg("job") || (server.hasArg("start") && server.arg("start") == "0");
-  if (!pollOnly && !startManualBleScan()) {
+  bleBms.prepareManualScan();
+  const BmsProfile &profile = activeProfile();
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  scan->clearResults();
+  const uint32_t startedMs = millis();
+  if (!scan->start(BLE_SCAN_DURATION_MS, false, true)) {
+    bleBms.finishManualScan();
     server.send(503, "application/json",
-                "{\"devices\":[],\"scanning\":false,\"error\":\"BLE scan could not start\"}");
+                "{\"devices\":[],\"error\":\"BLE scan start failed\"}");
     return;
   }
-  sendManualBleScanJson();
+  while (scan->isScanning() && millis() - startedMs <= BLE_SCAN_TIMEOUT_MS) {
+    delay(10);
+  }
+  const bool timedOut = scan->isScanning();
+  if (timedOut) scan->stop();
+  NimBLEScanResults results = scan->getResults();
+  Serial.printf("[BLE] web scan: %d seen (internal heap %u)\n",
+                results.getCount(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  JsonDocument doc;
+  doc["seen"] = results.getCount();
+  if (timedOut) doc["error"] = "BLE scan timeout";
+  JsonArray devices = doc["devices"].to<JsonArray>();
+  for (int i = 0; i < results.getCount(); ++i) {
+    const NimBLEAdvertisedDevice *d = results.getDevice(i);
+    if (!d) continue;
+    JsonObject obj = devices.add<JsonObject>();
+    obj["name"] = String(d->getName().c_str());
+    obj["address"] = String(d->getAddress().toString().c_str());
+    obj["rssi"] = d->getRSSI();
+    obj["compatible"] = deviceLooksCompatible(d, profile);
+    const BmsProfile *recommended = firstCompatibleProfile(d);
+    obj["recommended_profile"] = recommended ? recommended->id : "";
+    obj["recommended_label"] = recommended ? recommended->label : "";
+    JsonArray profileIds = obj["compatible_profiles"].to<JsonArray>();
+    for (const auto &candidate : BMS_PROFILES) {
+      if (deviceLooksCompatible(d, candidate)) profileIds.add(candidate.id);
+    }
+  }
+  scan->clearResults();
+  bleBms.finishManualScan();
+  sendJson(doc);
 }
 
 void apiBmsReconnect() {
-  requestBleReconnect();
+  bleBms.reconnect();
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
 void apiBmsReadNow() {
-  const bool ok = requestBleReadNow();
+  const bool ok = bleBms.readNow();
   server.send(ok ? 200 : 409, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"BMS not connected\"}");
 }
 
@@ -6044,25 +5707,32 @@ struct FirmwareUpdateState {
 static FirmwareUpdateState gFwUpd;
 static SemaphoreHandle_t   fwUpdMux        = nullptr;
 static TaskHandle_t        fwUpdTaskHandle = nullptr;
+static volatile bool       fwUpdateActive  = false;  // pauses BLE loop during flash
+static volatile bool       bleLoopBusy     = false;  // loop() is inside bleBms.loop()
 
 static constexpr uint32_t FWUPD_CHECK_BIT        = 0x01;
 static constexpr uint32_t FWUPD_APPLY_BIT        = 0x02;
 static constexpr uint32_t FWUPD_CHECK_MANUAL_BIT = 0x04;
 
-// Tearing NimBLE down while another task is inside a BLE call corrupts the
-// radio/network stack. The BLE worker owns every NimBLE call, so update code
-// pauses the worker and asks it to tear down/resume the radio synchronously.
+// Tearing NimBLE down while loop() is inside a BLE call corrupts the radio /
+// network stack (Wi-Fi goes fully dead while the LCD keeps running). Handshake:
+// raise the pause flag, then wait for loop() to actually leave bleBms.loop()
+// before deinit. loop() sets bleLoopBusy BEFORE re-checking fwUpdateActive, so
+// once the wait below observes !bleLoopBusy, no new BLE call can start.
 static void fwUpdPauseBle() {
   fwUpdateActive = true;
-  if (!sendBleCommand(BleWorkerCommandType::PauseUpdate, true, 9000)) {
-    bms.lastError = "BLE update pause timed out";
-  }
+  const uint32_t t0 = millis();
+  while (bleLoopBusy && millis() - t0 < 8000) delay(10);
+  delay(50);
+  NimBLEDevice::deinit(true);
+  bms.initialized = false;
+  bms.connected = false;
+  bms.authenticated = false;
+  bms.status = "paused for update";
 }
 
 static void fwUpdResumeBle() {
-  if (!sendBleCommand(BleWorkerCommandType::ResumeUpdate, true, 9000)) {
-    bms.lastError = "BLE update resume timed out";
-  }
+  if (!provisioningActive) bleBms.begin();
   fwUpdateActive = false;
 }
 
@@ -6553,7 +6223,6 @@ void setup() {
   R48Mic::begin(settings.featureMic, settings.micRunThreshold);
   WiFi.onEvent(onWiFiEvent);
   setupWiFi(setupButtonHeld);
-  startBleWorker();
   if (WiFi.status() == WL_CONNECTED) configureClock();
   setupOta();
   setupRoutes();
@@ -6601,6 +6270,9 @@ void loop() {
   server.handleClient();
   ArduinoOTA.handle();
   maintainWiFi();
+  bleLoopBusy = true;                   // set BEFORE the check — see fwUpdPauseBle
+  if (!fwUpdateActive && !provisioningActive) bleBms.loop();  // keep setup AP radio stable
+  bleLoopBusy = false;
   updateSocRate();
   updateDegradation();
   updateMqtt();

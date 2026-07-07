@@ -1005,19 +1005,7 @@ async function scanBle() {
   const host = $('ble-results');
   if (!host) return;
   host.innerHTML = '<div class="empty">Scanning…</div>';
-  let data = await (await fetch('/api/ble/scan?start=1')).json();
-  for (let i = 0; data.scanning && i < 24; i++) {
-    await new Promise(resolve => setTimeout(resolve, 500));
-    data = await (await fetch(`/api/ble/scan?job=${encodeURIComponent(data.job || '')}`)).json();
-  }
-  if (data.scanning) {
-    host.innerHTML = '<div class="empty">Scan still running; check again in a moment</div>';
-    return;
-  }
-  if (data.error && (!data.devices || !data.devices.length)) {
-    host.innerHTML = `<div class="empty">${escAttr(data.error)}</div>`;
-    return;
-  }
+  const data = await (await fetch('/api/ble/scan')).json();
   if (!data.devices || !data.devices.length) {
     host.innerHTML = '<div class="empty">No BLE devices found</div>';
     return;
