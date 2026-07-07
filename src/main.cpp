@@ -58,12 +58,15 @@ constexpr float BATTERY_EXTERNAL_HIGH_V = 4.12f;
 constexpr float BATTERY_EXTERNAL_RISE_V = 0.050f;
 constexpr int16_t BATTERY_EXTERNAL_FAST_RISE_MV = 80;
 constexpr int16_t BATTERY_EXTERNAL_DROP_MV = -80;
-constexpr uint32_t BLE_SCAN_RETRY_MS = 15000;
-constexpr uint32_t BLE_SCAN_DURATION_MS = 3000;
+constexpr uint32_t BLE_SCAN_RETRY_MS = 60000;
+constexpr uint32_t BLE_SCAN_DURATION_MS = 6000;
 constexpr uint32_t BLE_SCAN_TIMEOUT_MS = 9000;
-constexpr uint16_t BLE_SCAN_INTERVAL_MS = 320;
-constexpr uint16_t BLE_SCAN_WINDOW_MS = 40;
+constexpr uint16_t BLE_SCAN_INTERVAL_MS = 160;
+constexpr uint16_t BLE_SCAN_WINDOW_MS = 80;
 constexpr uint8_t BLE_SCAN_STORED_RESULTS_MAX = 64;
+constexpr uint8_t BLE_SCAN_TIMEOUTS_BEFORE_PAUSE = 3;
+constexpr uint32_t BLE_TIMEOUT_COOLDOWN_MS = 300000UL;
+constexpr uint32_t BLE_STA_STABILIZE_MS = 45000UL;
 constexpr uint32_t BLE_POLL_ANALOG_MS = 5000;
 constexpr uint32_t BLE_POLL_ANALOG_IDLE_MS = 60000;
 constexpr uint32_t BLE_POLL_WARNING_MS = 30000;
@@ -482,6 +485,8 @@ uint8_t ioExpanderOutput = 0x07;
 uint8_t displayPage = 0;
 uint32_t lastWifiAttemptMs = 0;
 uint32_t wifiDisconnectedSinceMs = 0;
+volatile uint32_t staConnectedSinceMs = 0;
+uint32_t bleRadioBlockedUntilMs = 0;
 uint32_t lastDisplayMs = 0;
 uint32_t lastWebRequestMs = 0;
 uint32_t lastBatteryMs = 0;
@@ -731,6 +736,20 @@ bool deviceAdvertisesProfile(const NimBLEAdvertisedDevice *device, const BmsProf
   return device && device->isAdvertisingService(NimBLEUUID(profile.serviceUuid));
 }
 
+bool startsWithIgnoreCase(const String &value, const char *prefix) {
+  if (!prefix) return false;
+  const size_t prefixLen = strlen(prefix);
+  if (value.length() < prefixLen) return false;
+  for (size_t i = 0; i < prefixLen; ++i) {
+    char a = value[i];
+    char b = prefix[i];
+    if (a >= 'A' && a <= 'Z') a += 32;
+    if (b >= 'A' && b <= 'Z') b += 32;
+    if (a != b) return false;
+  }
+  return true;
+}
+
 bool asciiEqualsIgnoreCase(const char *a, const char *b) {
   if (!a || !b) return false;
   while (*a && *b) {
@@ -743,19 +762,47 @@ bool asciiEqualsIgnoreCase(const char *a, const char *b) {
   return *a == '\0' && *b == '\0';
 }
 
+bool profileNameHintMatches(const String &name, const BmsProfile &profile) {
+  if (name.isEmpty()) return false;
+  const String profileId(profile.id);
+  if (profileId == "humsienk_watt") {
+    return startsWithIgnoreCase(name, "HS") ||
+           startsWithIgnoreCase(name, "Humsienk") ||
+           startsWithIgnoreCase(name, "Hoperf") ||
+           startsWithIgnoreCase(name, "WATT");
+  }
+  if (profileId == "jbd_xiaoxiang_ff00" || profileId == "jbd_xiaoxiang_ffe0") {
+    return startsWithIgnoreCase(name, "JBD") ||
+           startsWithIgnoreCase(name, "Xiaoxiang");
+  }
+  if (profileId == "jk_bms_ble") {
+    return startsWithIgnoreCase(name, "JK") ||
+           startsWithIgnoreCase(name, "Jikong");
+  }
+  if (profileId == "daly_bms_ble") {
+    return startsWithIgnoreCase(name, "Daly") ||
+           startsWithIgnoreCase(name, "DL-");
+  }
+  return false;
+}
+
+bool deviceLooksCompatible(const NimBLEAdvertisedDevice *device, const BmsProfile &profile) {
+  if (!device) return false;
+  if (deviceAdvertisesProfile(device, profile)) return true;
+  return profileNameHintMatches(String(device->getName().c_str()), profile);
+}
+
 const BmsProfile *firstCompatibleProfile(const NimBLEAdvertisedDevice *device) {
   if (!device) return nullptr;
   const String name(device->getName().c_str());
   // Name-pattern hints override UUID-order for devices that share service UUIDs
-  if (name.startsWith("HS") || name.startsWith("Humsienk") || name.startsWith("humsienk")) {
+  if (profileNameHintMatches(name, BMS_PROFILES[0])) {
     for (const auto &p : BMS_PROFILES) {
-      if (String(p.id) == "humsienk_watt" && deviceAdvertisesProfile(device, p)) return &p;
+      if (String(p.id) == "humsienk_watt") return &p;
     }
   }
-  if (name.startsWith("JK") || name.startsWith("jk-") || name.startsWith("JK-")) {
-    for (const auto &p : BMS_PROFILES) {
-      if (String(p.id) == "jk_bms_ble" && deviceAdvertisesProfile(device, p)) return &p;
-    }
+  for (const auto &profile : BMS_PROFILES) {
+    if (profileNameHintMatches(name, profile)) return &profile;
   }
   for (const auto &profile : BMS_PROFILES) {
     if (deviceAdvertisesProfile(device, profile)) return &profile;
@@ -1000,8 +1047,28 @@ class BleBmsClient : public NimBLEScanCallbacks {
   void loop() {
     drainNotifyQueue();
     if (!bms.enabled) return;
-    if (!bms.initialized) begin();
     const uint32_t now = millis();
+    if (bleRadioBlockedUntilMs != 0) {
+      if (static_cast<int32_t>(bleRadioBlockedUntilMs - now) > 0) {
+        bms.status = String("BLE paused — retry ") + formatCountdown(bleRadioBlockedUntilMs - now);
+        return;
+      }
+      bleRadioBlockedUntilMs = 0;
+      scanTimeouts_ = 0;
+      bms.lastScanMs = 0;
+    }
+    if (!settings.wifiSsid.isEmpty()) {
+      if (WiFi.status() != WL_CONNECTED || staConnectedSinceMs == 0) {
+        bms.status = "BLE waiting for STA";
+        return;
+      }
+      const uint32_t staAgeMs = now - staConnectedSinceMs;
+      if (staAgeMs < BLE_STA_STABILIZE_MS) {
+        bms.status = String("BLE waiting for WiFi ") + formatCountdown(BLE_STA_STABILIZE_MS - staAgeMs);
+        return;
+      }
+    }
+    if (!bms.initialized) begin();
     if (scanInProgress_) {
       serviceActiveScan(now);
       return;
@@ -1096,6 +1163,16 @@ class BleBmsClient : public NimBLEScanCallbacks {
 
   void prepareManualScan() {
     if (!bms.initialized) begin();
+    if (scanInProgress_) {
+      NimBLEScan *scan = NimBLEDevice::getScan();
+      if (scan && scan->isScanning()) scan->stop();
+      if (scan) scan->clearResults();
+      autoScanArmed_ = false;
+      scanInProgress_ = false;
+      scanDone_ = false;
+      bms.scanning = false;
+      bms.status = "manual BLE scan";
+    }
     configureScannerForStoredResults(NimBLEDevice::getScan());
   }
 
@@ -1232,13 +1309,13 @@ class BleBmsClient : public NimBLEScanCallbacks {
     if (target.length() > 0) {
       return name == target || address.equalsIgnoreCase(target);
     }
-    return deviceAdvertisesProfile(device, profile);
+    return deviceLooksCompatible(device, profile);
   }
 
   void configureScannerForAuto(NimBLEScan *scan) {
     if (!scan) return;
     scan->setScanCallbacks(this, false);
-    scan->setActiveScan(true);
+    scan->setActiveScan(false);
     scan->setInterval(BLE_SCAN_INTERVAL_MS);
     scan->setWindow(BLE_SCAN_WINDOW_MS);
     scan->setScanResponseTimeout(250);
@@ -1248,7 +1325,7 @@ class BleBmsClient : public NimBLEScanCallbacks {
   void configureScannerForStoredResults(NimBLEScan *scan) {
     if (!scan) return;
     scan->setScanCallbacks(nullptr, false);
-    scan->setActiveScan(true);
+    scan->setActiveScan(false);
     scan->setInterval(BLE_SCAN_INTERVAL_MS);
     scan->setWindow(BLE_SCAN_WINDOW_MS);
     scan->setScanResponseTimeout(250);
@@ -1263,7 +1340,7 @@ class BleBmsClient : public NimBLEScanCallbacks {
       const std::string address = device->getAddress().toString();
       return asciiEqualsIgnoreCase(address.c_str(), scanTarget_);
     }
-    return deviceAdvertisesProfile(device, *scanProfile_);
+    return deviceLooksCompatible(device, *scanProfile_);
   }
 
   void startScanAndConnect(uint32_t now) {
@@ -1322,9 +1399,23 @@ class BleBmsClient : public NimBLEScanCallbacks {
     bms.connected = false;
     bms.authenticated = false;
     bms.errors++;
-    bms.status = "BLE scan timeout; reset BLE";
     bms.lastError = "NimBLE scan did not finish";
-    resetBleStack();
+    scanTimeouts_++;
+    if (scanTimeouts_ >= BLE_SCAN_TIMEOUTS_BEFORE_PAUSE) {
+      resetClient(true);
+      if (bms.initialized) {
+        NimBLEDevice::deinit(true);
+        bms.initialized = false;
+      }
+      bleClientForNotify = nullptr;
+      bleRadioBlockedUntilMs = now + BLE_TIMEOUT_COOLDOWN_MS;
+      scanTimeouts_ = 0;
+      bms.status = "BLE paused after scan timeouts";
+      Serial.printf("[BLE] paused for %lu ms after repeated scan timeouts\n",
+                    static_cast<unsigned long>(BLE_TIMEOUT_COOLDOWN_MS));
+    } else {
+      bms.status = "BLE scan timeout; retrying later";
+    }
   }
 
   void finishScanAndConnect() {
@@ -1343,6 +1434,7 @@ class BleBmsClient : public NimBLEScanCallbacks {
                   matched ? "yes" : "no",
                   reason,
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    scanTimeouts_ = 0;
     if (matched) {
       connectToTarget(scanMatchAddress_, profile, scanMatchName_, scanMatchRssi_);
     } else {
@@ -2025,6 +2117,7 @@ class BleBmsClient : public NimBLEScanCallbacks {
   volatile int scanEndReason_ = 0;
   int8_t scanMatchRssi_ = 0;
   uint32_t scanStartedMs_ = 0;
+  uint8_t scanTimeouts_ = 0;
   uint8_t rxBuffer_[512]{};
   size_t rxLen_ = 0;
   uint32_t lastRssiMs_ = 0;
@@ -4497,9 +4590,11 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       staProvisionTrial = false;
+      staConnectedSinceMs = millis();
       Serial.printf("[WiFi] STA got IP %s\n", WiFi.localIP().toString().c_str());
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      staConnectedSinceMs = 0;
       Serial.printf("[WiFi] STA disconnected (reason %u)\n",
                     info.wifi_sta_disconnected.reason);
       break;
@@ -4596,8 +4691,11 @@ void maintainWiFi() {
   // bounced a working device back to the setup AP.
   const bool staLinkUp = wifiStatus == WL_CONNECTED || WiFi.localIP()[0] != 0;
   if (staLinkUp) {
+    if (staConnectedSinceMs == 0) staConnectedSinceMs = now;
     wifiDisconnectedSinceMs = 0;
     staProvisionTrial = false;   // credentials proven good — stop trialing
+  } else {
+    staConnectedSinceMs = 0;
   }
   if (!settings.wifiSsid.isEmpty() && !staLinkUp) {
     if (wifiDisconnectedSinceMs == 0) wifiDisconnectedSinceMs = now;
@@ -5487,11 +5585,6 @@ void apiBleScan() {
                 "{\"devices\":[],\"error\":\"BLE scan disabled while setup AP is active\"}");
     return;
   }
-  if (bleBms.scanBusy()) {
-    server.send(409, "application/json",
-                "{\"devices\":[],\"error\":\"automatic BMS scan in progress\"}");
-    return;
-  }
   bleBms.prepareManualScan();
   const BmsProfile &profile = activeProfile();
   NimBLEScan *scan = NimBLEDevice::getScan();
@@ -5522,13 +5615,13 @@ void apiBleScan() {
     obj["name"] = String(d->getName().c_str());
     obj["address"] = String(d->getAddress().toString().c_str());
     obj["rssi"] = d->getRSSI();
-    obj["compatible"] = deviceAdvertisesProfile(d, profile);
+    obj["compatible"] = deviceLooksCompatible(d, profile);
     const BmsProfile *recommended = firstCompatibleProfile(d);
     obj["recommended_profile"] = recommended ? recommended->id : "";
     obj["recommended_label"] = recommended ? recommended->label : "";
     JsonArray profileIds = obj["compatible_profiles"].to<JsonArray>();
     for (const auto &candidate : BMS_PROFILES) {
-      if (deviceAdvertisesProfile(d, candidate)) profileIds.add(candidate.id);
+      if (deviceLooksCompatible(d, candidate)) profileIds.add(candidate.id);
     }
   }
   scan->clearResults();
@@ -6129,7 +6222,6 @@ void setup() {
   updateScreenBattery();
   R48Mic::begin(settings.featureMic, settings.micRunThreshold);
   WiFi.onEvent(onWiFiEvent);
-  if (!setupButtonHeld && !settings.wifiSsid.isEmpty() && bms.enabled) bleBms.begin();
   setupWiFi(setupButtonHeld);
   if (WiFi.status() == WL_CONNECTED) configureClock();
   setupOta();

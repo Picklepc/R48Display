@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.5.0a10](docs/releases/v0.5.0a10.md) | **Alpha (pre-release)** — BLE recovery pass: delays BLE until STA/web are stable, uses passive scans, lets manual scan cancel auto scan, and pauses BLE after repeated scan timeouts instead of resetting the stack. |
 | [v0.5.0a9](docs/releases/v0.5.0a9.md) | **Alpha (pre-release)** — completes the BLE coexistence pass by making the settings-page manual BLE scan bounded/non-blocking-safe too. |
 | [v0.5.0a8](docs/releases/v0.5.0a8.md) | **Alpha (pre-release)** — BLE coexistence pass: non-blocking BMS scans, scan timeout recovery, earlier STA-mode NimBLE init, and manual-scan guarding. |
 | [v0.5.0a7](docs/releases/v0.5.0a7.md) | **Alpha (pre-release)** — fixes the core-3 Wi-Fi drop: `WIFI_PS_MAX_MODEM` + BLE coexistence was dropping the STA link ~1 min after connecting (idle power-save), bouncing to the setup AP. Now holds `MIN_MODEM` on core 3, latches connection on the got-IP event, and logs Wi-Fi events over serial. Should also restore BLE (paused only while the AP is up). |
