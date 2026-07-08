@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.5.0a13](docs/releases/v0.5.0a13.md) | **Alpha (pre-release)** — steps back from the a12 BLE-worker-task boot loop to a11's proven coexistence-aware async BLE; adds the documented guard to init BLE only under WiFi `MIN_MODEM` (NimBLE #437 / ESP-IDF coexistence). Serial `[BLE]` scan counts drive the next proven step (passive vs active scan). |
 | [v0.5.0a11](docs/releases/v0.5.0a11.md) | **Alpha (pre-release)** — keeps the 3.x migration but pins pioarduino to Arduino-ESP32 3.1.3 / ESP-IDF 5.3.2 to test BLE stability before reverting to the 0.4.x core. |
 | [v0.5.0a10](docs/releases/v0.5.0a10.md) | **Alpha (pre-release)** — BLE recovery pass: delays BLE until STA/web are stable, uses passive scans, lets manual scan cancel auto scan, and pauses BLE after repeated scan timeouts instead of resetting the stack. |
 | [v0.5.0a9](docs/releases/v0.5.0a9.md) | **Alpha (pre-release)** — completes the BLE coexistence pass by making the settings-page manual BLE scan bounded/non-blocking-safe too. |

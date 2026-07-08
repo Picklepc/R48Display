@@ -1027,6 +1027,13 @@ class BleBmsClient : public NimBLEScanCallbacks {
  public:
   void begin() {
     if (bms.initialized) return;
+    // Proven coexistence rule (NimBLE-Arduino #437 + ESP-IDF RF-coexistence
+    // guide): the BLE controller must NOT be initialized while WiFi modem-sleep
+    // is off. WIFI_PS_NONE (which the setup AP uses) is documented to crash under
+    // software coexistence on core 3. Force MIN_MODEM before init so BLE always
+    // comes up in the coexistence-safe state, whatever path got us here.
+    WiFi.setSleep(true);
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     const uint32_t heapBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     NimBLEDevice::init(settings.hostname.c_str());
     NimBLEDevice::setPower(3);
