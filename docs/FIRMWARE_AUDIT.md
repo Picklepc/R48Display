@@ -500,6 +500,10 @@ GitHub Actions builds the firmware on every push and uploads:
 - `R48Display-vX.Y.Z-merged.bin` for full flash at offset `0x0`.
 - `R48Display-vX.Y.Z.sha256` for integrity checks.
 
+For ESP32-S3 merged images, keep the bootloader flash-mode header at `0x02`
+(DIO), matching PlatformIO's direct USB upload path. Forcing the merged image to
+QIO can make freshly erased boards reset before the app starts.
+
 Do not commit generated `.bin` files. Attach them to GitHub Releases or use the workflow artifact.
 ```
 

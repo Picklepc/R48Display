@@ -32,6 +32,7 @@
 #include "MicDetector.h"
 #include "MqttClient.h"
 #include "WebPages.h"
+#include "WaveshareST77916Init.h"
 
 namespace {
 
@@ -272,6 +273,7 @@ struct AppSettings {
   String themeId = "chlorophyll_shift";
   bool dischargeCurrentNegative = true;
   bool displayEnabled = true;
+  String displayInitMode = "generic";
   bool activityDetection = true;
   bool workDetection = true;
   float typicalMowAmps = DEFAULT_TYPICAL_MOW_AMPS;
@@ -428,8 +430,7 @@ TwoWire touchWire(1);
 
 Arduino_DataBus *displayBus = new Arduino_ESP32QSPI(
     PIN_LCD_CS, PIN_LCD_SCK, PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3);
-Arduino_GFX *gfx = new Arduino_ST77916(
-    displayBus, GFX_NOT_DEFINED, 0, true, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+Arduino_GFX *gfx = nullptr;
 
 struct DegradationData {
   float maxCellSpreadMv = 0.0f;
@@ -573,6 +574,23 @@ uint16_t normalizeDisplayRotation(int value) {
     default:
       return 0;
   }
+}
+
+String normalizeDisplayInitMode(String value) {
+  value.trim();
+  value.toLowerCase();
+  return value == "waveshare" ? "waveshare" : "generic";
+}
+
+Arduino_GFX *createDisplayPanel() {
+  if (settings.displayInitMode == "waveshare") {
+    return new Arduino_ST77916(
+        displayBus, GFX_NOT_DEFINED, 0, true, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+        0, 0, 0, 0, waveshare_st77916_init_operations,
+        sizeof(waveshare_st77916_init_operations));
+  }
+  return new Arduino_ST77916(
+      displayBus, GFX_NOT_DEFINED, 0, true, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
 
 uint8_t displayRotationStep() {
@@ -3795,6 +3813,7 @@ void loadSettings() {
   settings.themeId = prefs.getString("theme", settings.themeId);
   settings.dischargeCurrentNegative = prefs.getBool("curNeg", true);
   settings.displayEnabled = prefs.getBool("display", true);
+  settings.displayInitMode = prefs.getString("dispInit", settings.displayInitMode);
   settings.activityDetection = prefs.getBool("activity", settings.activityDetection);
   settings.workDetection = prefs.getBool("workDetect", settings.workDetection);
   settings.typicalMowAmps = prefs.getFloat("mowAmps", DEFAULT_TYPICAL_MOW_AMPS);
@@ -3857,6 +3876,7 @@ void loadSettings() {
   if (settings.subtitle.isEmpty()) settings.subtitle = DEFAULT_SUBTITLE;
   if (settings.timezone.isEmpty() || settings.timezone == "PST8PDT,M3.2.0,M11.1.0") settings.timezone = DEFAULT_TZ;
   if (settings.ntpServer.isEmpty()) settings.ntpServer = DEFAULT_NTP_SERVER;
+  settings.displayInitMode = normalizeDisplayInitMode(settings.displayInitMode);
   settings.brightness = constrain(settings.brightness, static_cast<uint8_t>(20), static_cast<uint8_t>(255));
   settings.displayRotation = normalizeDisplayRotation(settings.displayRotation);
   settings.lcdTimeoutSec = constrain(settings.lcdTimeoutSec, static_cast<uint16_t>(0), static_cast<uint16_t>(3600));
@@ -3893,6 +3913,7 @@ void saveSettings() {
   prefs.putString("theme", settings.themeId);
   prefs.putBool("curNeg", settings.dischargeCurrentNegative);
   prefs.putBool("display", settings.displayEnabled);
+  prefs.putString("dispInit", settings.displayInitMode);
   prefs.putBool("activity", settings.activityDetection);
   prefs.putBool("workDetect", settings.workDetection);
   prefs.putFloat("mowAmps", settings.typicalMowAmps);
@@ -4402,6 +4423,7 @@ void setHoursTotal(float hours) {
 }
 
 void initDisplay() {
+  if (!gfx) gfx = createDisplayPanel();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.setClock(400000);
   initIoExpander();
@@ -4412,6 +4434,7 @@ void initDisplay() {
   internalI2cAddresses = i2cAddressCsv(Wire);
   touchI2cAddresses = i2cAddressCsv(touchWire);
   setBacklight(settings.displayEnabled ? settings.brightness : 0);
+  Serial.printf("Display init mode: %s\n", settings.displayInitMode.c_str());
   displayReady = gfx->begin(40000000);
   if (displayReady) {
     applyDisplayRotation();
@@ -5161,6 +5184,7 @@ void addStatusJson(JsonDocument &doc, bool full = true) {
   JsonObject hardware = doc["hardware"].to<JsonObject>();
   hardware["display_ready"] = displayReady;
   hardware["display_enabled"] = settings.displayEnabled;
+  hardware["display_init_mode"] = settings.displayInitMode;
   hardware["display_sleeping"] = displaySleeping;
   hardware["display_rotation"] = settings.displayRotation;
   hardware["boot_button_pressed"] = bootButton.stablePressed;
@@ -5200,6 +5224,7 @@ void addStatusJson(JsonDocument &doc, bool full = true) {
   JsonObject display = doc["display"].to<JsonObject>();
   display["page"] = displayPage;
   display["page_name"] = displayPageName(displayPage);
+  display["init_mode"] = settings.displayInitMode;
   display["rotation_degrees"] = settings.displayRotation;
   display["refresh_ms"] = displayRefreshIntervalMs();
   display["sleep_timeout_ms"] = displaySleepTimeoutMs();
@@ -5310,6 +5335,7 @@ void apiSettingsGet() {
   doc["theme_id"] = settings.themeId;
   doc["discharge_current_negative"] = settings.dischargeCurrentNegative;
   doc["display_enabled"] = settings.displayEnabled;
+  doc["display_init_mode"] = settings.displayInitMode;
   doc["activity_detection"] = settings.activityDetection;
   doc["work_detection"] = settings.workDetection;
   doc["typical_mow_amps"] = settings.typicalMowAmps;
@@ -5396,6 +5422,7 @@ void apiSettingsPost() {
   if (server.hasArg("theme_id")) settings.themeId = server.arg("theme_id").substring(0, 32);
   if (server.hasArg("discharge_current_negative")) settings.dischargeCurrentNegative = server.arg("discharge_current_negative") == "1";
   if (server.hasArg("display_enabled")) settings.displayEnabled = server.arg("display_enabled") == "1";
+  if (server.hasArg("display_init_mode")) settings.displayInitMode = normalizeDisplayInitMode(server.arg("display_init_mode"));
   if (server.hasArg("activity_detection")) settings.activityDetection = server.arg("activity_detection") == "1";
   if (server.hasArg("work_detection")) settings.workDetection = server.arg("work_detection") == "1";
   if (server.hasArg("typical_mow_amps")) settings.typicalMowAmps = constrain(server.arg("typical_mow_amps").toFloat(), 5.0f, 300.0f);
@@ -5456,6 +5483,7 @@ void apiSettingsPost() {
   if (settings.subtitle.isEmpty()) settings.subtitle = DEFAULT_SUBTITLE;
   if (settings.timezone.isEmpty() || settings.timezone == "PST8PDT,M3.2.0,M11.1.0") settings.timezone = DEFAULT_TZ;
   if (settings.ntpServer.isEmpty()) settings.ntpServer = DEFAULT_NTP_SERVER;
+  settings.displayInitMode = normalizeDisplayInitMode(settings.displayInitMode);
   if (settings.bladesOnAmps < settings.mowerRunAmps) settings.bladesOnAmps = settings.mowerRunAmps;
   if (settings.apPassword.length() < 8) settings.apPassword = "r48display";
   if (settings.otaPassword.length() < 8) settings.otaPassword = "r48display";

@@ -243,6 +243,10 @@ PGM_P settingsBody() {
       "<option value='180'>180&deg;</option>"
       "<option value='270'>270&deg;</option>"
       "</select></label>"
+      "<label>Display Panel Init<select name='display_init_mode' id='display-init-mode'>"
+      "<option value='generic'>Generic Arduino_GFX (legacy)</option>"
+      "<option value='waveshare'>Waveshare vendor table</option>"
+      "</select><span class='hint'>Requires reboot. Use Generic if this display worked in earlier releases; use Waveshare for panels that show lines/noise with Generic.</span></label>"
       "<label class='check'><input name='display_enabled' type='checkbox'> Display enabled</label>"
       "<label class='check'><input name='anim_enabled' id='animEnabledCb' type='checkbox' onchange='toggleAnimOptions(this.checked)'> Background animations enabled</label>"
       "<div id='anim-options' style='display:none;margin-top:4px'>"
@@ -617,6 +621,7 @@ const qsa = (sel) => Array.from(document.querySelectorAll(sel));
 let themeOptions = [];
 let usageCategories = [];
 let _loadedHoursBaseline = 0;
+let _loadedDisplayInitMode = 'generic';
 let machineFields = [];
 let maintHistoryEntries = {};
 let _maintSummaryLast = 0;
@@ -975,6 +980,7 @@ async function loadSettings() {
     else if (data[key] !== undefined) el.value = data[key];
   });
   _loadedHoursBaseline = parseFloat(data.hours_baseline || '0');
+  _loadedDisplayInitMode = data.display_init_mode || 'generic';
   const battCb = document.getElementById('battEnCb');
   if (battCb) toggleBattOptions(battCb.checked);
   const animCb = document.getElementById('animEnabledCb');
@@ -1124,6 +1130,7 @@ function wireActions() {
     data.anim_type = form.elements.anim_type ? form.elements.anim_type.value : '0';
     data.track_daily_activity = form.elements.track_daily_activity.checked ? '1' : '0';
     data.track_pay = form.elements.track_pay.checked ? '1' : '0';
+    const displayInitChanged = data.display_init_mode && data.display_init_mode !== _loadedDisplayInitMode;
     delete data.standby_hint;
     delete data.hours_counted;
     // Only send hours_baseline if the user actually changed it; otherwise let
@@ -1138,6 +1145,10 @@ function wireActions() {
       return;
     }
     refreshThemeCss();
+    if (displayInitChanged && confirm('Display panel init mode changed. Reboot now to apply it?')) {
+      await postForm('/api/reboot', {});
+      return;
+    }
     await loadSettings();
     await refreshFull();
   });

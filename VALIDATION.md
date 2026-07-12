@@ -39,6 +39,8 @@ Pass / Fail      : _______________
 - [ ] Generated partition table shows `otadata` at `0xe000`, `app0` at
       `0x10000`, `app1` at `0x510000`, and `nvs` at `0xa10000` with size
       `256K`.
+- [ ] Merged release image byte 2 is `0x02` (DIO bootloader flash-mode header),
+      matching PlatformIO's ESP32-S3 direct USB upload path.
 - [ ] Fresh install from 0.2.x or older was done by erasing flash, then using
       PlatformIO USB upload or the merged release binary at offset `0x0`.
 - [ ] App-only OTA was not used as the first 0.3.0 install path.
