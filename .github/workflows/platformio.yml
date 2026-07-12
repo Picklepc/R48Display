@@ -50,6 +50,9 @@ jobs:
           # (rich_click), so reuse the factory image PlatformIO already assembles
           # (bootloader + partitions + boot_app0 + app at the partitions.csv
           # offsets). Fall back to a hand merge only if it isn't produced.
+          # ESP32-S3 PlatformIO uploads map qio/qout to a DIO boot-image header;
+          # merged web-installer images must match that or erased installs can
+          # reset before the app starts.
           if [ -f "$FACTORY" ]; then
             cp "$FACTORY" firmware-merged.bin
           else
@@ -74,9 +77,17 @@ jobs:
             test -n "$APP_OFFSET"
             python "$ESPTOOL" --chip esp32s3 merge_bin \
               -o firmware-merged.bin \
-              --flash_mode qio --flash_freq 80m --flash_size 16MB \
+              --flash_mode dio --flash_freq 80m --flash_size 16MB \
               0x0 "$BOOT" 0x8000 "$PARTS" "$OTADATA_OFFSET" "$BOOT_APP0" "$APP_OFFSET" "$APP"
           fi
+          python - <<'PY'
+          from pathlib import Path
+          data = Path("firmware-merged.bin").read_bytes()
+          mode = data[2] if len(data) > 2 else None
+          if mode != 0x02:
+              got = "missing" if mode is None else f"0x{mode:02x}"
+              raise SystemExit(f"firmware-merged.bin bootloader flash mode header must be 0x02 (DIO); got {got}")
+          PY
           sha256sum "$APP" firmware-merged.bin > checksums.sha256
 
       - name: Upload artifacts

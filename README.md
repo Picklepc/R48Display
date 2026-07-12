@@ -105,6 +105,12 @@ saved settings.
 The installer uses Web Serial, which works in Chrome and Edge only — not Firefox
 or Safari.
 
+For erased boards or recovery flashes, use the web installer after the
+fresh-install packaging fix is deployed, or use a regenerated merged binary.
+Older raw release downloads can carry a QIO bootloader flash-mode header even
+though PlatformIO direct USB flashing uses DIO on ESP32-S3; affected boards reset
+before the app starts after a full erase.
+
 ### Updating
 
 Once the device is on Wi-Fi it updates itself — no PC required. Open **Settings →
@@ -287,6 +293,12 @@ For 0.3.0 and later, use the merged binary for erased boards, recovery flashes,
 and any install that needs the partition table changed. The app-only
 `firmware.bin` is for OTA or PlatformIO app uploads after the partition table is
 already installed.
+
+The web installer normalizes served merged ESP32-S3 images to the same DIO
+bootloader flash-mode header used by PlatformIO direct USB upload, including the
+stable default release. Release v0.5.0a15 and later also generate DIO merged
+assets directly in CI. This matters for fresh-erased installs because the
+bootloader must run before the app can repair or initialize NVS.
 
 ## Documentation
 

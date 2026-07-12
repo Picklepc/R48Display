@@ -11,6 +11,10 @@ $BoardConfig = Join-Path $Root "include\BoardConfig.h"
 $FirmwareDir = Join-Path $Root "firmware"
 $BuildDir = Join-Path $Root ".pio\build\$Environment"
 $PartitionsCsv = Join-Path $Root "partitions.csv"
+# PlatformIO maps ESP32-S3 qio/qout upload modes to a DIO boot-image header.
+# Keep merged web-installer images byte-compatible with direct PlatformIO USB
+# uploads, or freshly erased boards can reset before the app starts.
+$MergedFlashMode = "dio"
 
 if (-not $Version) {
   $ConfigText = Get-Content -Raw $BoardConfig
@@ -86,13 +90,19 @@ Copy-Item -Force $App $AppOut
 
 & $Python $Esptool --chip esp32s3 merge_bin `
   -o $MergedOut `
-  --flash_mode qio `
+  --flash_mode $MergedFlashMode `
   --flash_freq 80m `
   --flash_size 16MB `
   0x0 $Bootloader `
   0x8000 $Partitions `
   $OtaDataOffset $BootApp0 `
   $AppOffset $App
+
+$MergedBytes = [System.IO.File]::ReadAllBytes($MergedOut)
+if ($MergedBytes.Length -lt 3 -or $MergedBytes[2] -ne 0x02) {
+  $ActualMode = if ($MergedBytes.Length -lt 3) { "missing" } else { "0x$($MergedBytes[2].ToString('x2'))" }
+  throw "Merged image bootloader flash mode header must be 0x02 (DIO); got $ActualMode."
+}
 
 Get-FileHash -Algorithm SHA256 $AppOut, $MergedOut |
   ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
@@ -103,5 +113,6 @@ Write-Host "  $AppOut"
 Write-Host "  $MergedOut"
 Write-Host "  $HashOut"
 Write-Host "Offsets:"
+Write-Host "  flash mode $MergedFlashMode"
 Write-Host "  otadata $OtaDataOffset"
 Write-Host "  app0    $AppOffset"
