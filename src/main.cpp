@@ -5121,10 +5121,19 @@ void maintainWiFi() {
   if (WiFi.status() == WL_CONNECTED && settings.ntpEnabled && !ntpConfigured) configureClock();
 }
 
+static void fwUpdPauseBle();
+static void fwUpdResumeBle();
+
 void setupOta() {
   ArduinoOTA.setHostname(settings.hostname.c_str());
   ArduinoOTA.setPassword(settings.otaPassword.c_str());
   ArduinoOTA.onStart([]() {
+    // Tear BLE down for the transfer. On a live, BMS-connected device, BLE and
+    // the OTA otherwise contend for the radio and internal RAM and the device
+    // drops the upload mid-stream (WinError 10054). Same teardown the on-device
+    // updater uses. onStart runs from ArduinoOTA.handle(), just before
+    // bleBms.loop() in the same loop iteration, so BLE is never mid-call here.
+    fwUpdPauseBle();
     if (!displayReady) return;
     gfx->fillScreen(COLOR_BG);
     gfx->setTextSize(2);
@@ -5137,6 +5146,10 @@ void setupOta() {
     gfx->setCursor(116, 190);
     gfx->setTextColor(COLOR_GREEN, COLOR_BG);
     gfx->print(F("rebooting"));
+  });
+  ArduinoOTA.onError([](ota_error_t) {
+    // Upload failed and the device is NOT rebooting — bring BLE back up.
+    fwUpdResumeBle();
   });
   ArduinoOTA.begin();
 }

@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.5.0a20](docs/releases/v0.5.0a20.md) | **Alpha (pre-release)** — reliable OTA: the ArduinoOTA/espota path now tears BLE down during the transfer (BLE + OTA were contending for radio/RAM and dropping the upload mid-stream on a live device). Install over USB; the fix helps subsequent over-the-air updates. |
 | [v0.5.0a19](docs/releases/v0.5.0a19.md) | **Alpha (pre-release)** — boot audio intro plays right after boot instead of waiting for STA/BLE; restores prompt power-off on external-power loss (sharp pack-voltage-drop detection, ~8 s debounce) so it no longer runs for minutes on the onboard battery. Rolls up a16–a18 audio + display-panel work. |
 | [v0.5.0a15](docs/releases/v0.5.0a15.md) | **Alpha (pre-release)** - fixes erased/fresh USB installer boot loops by packaging merged images with the same ESP32-S3 DIO boot header PlatformIO uses; adds selectable generic/Waveshare display-panel init modes for black-screen troubleshooting. |
 | [v0.5.0a13](docs/releases/v0.5.0a13.md) | **Alpha (pre-release)** — steps back from the a12 BLE-worker-task boot loop to a11's proven coexistence-aware async BLE; adds the documented guard to init BLE only under WiFi `MIN_MODEM` (NimBLE #437 / ESP-IDF coexistence). Serial `[BLE]` scan counts drive the next proven step (passive vs active scan). |
