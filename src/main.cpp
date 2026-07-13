@@ -22,6 +22,7 @@
 #include <esp_ota_ops.h>
 #include <esp_task_wdt.h>
 #include <nvs_flash.h>
+#include <driver/i2s.h>
 
 #include <Arduino_GFX_Library.h>
 #include <NimBLEDevice.h>
@@ -49,6 +50,12 @@ constexpr uint32_t DISPLAY_REFRESH_MS = 2500;
 constexpr uint32_t DISPLAY_CLOCK_REFRESH_MS = 1000;
 constexpr uint32_t DISPLAY_SLEEP_IDLE_MS = 300000;
 constexpr uint32_t DISPLAY_SLEEP_BATTERY_CAP_MS = 120000;
+constexpr uint32_t STARTUP_CHIME_SAMPLE_RATE = 22050;
+constexpr size_t STARTUP_CHIME_FRAMES = 128;
+constexpr size_t STARTUP_CHIME_MAX_CHARS = 1024;
+constexpr uint8_t STARTUP_CHIME_MAX_NOTES = 64;
+constexpr uint32_t STARTUP_CHIME_MAX_TOTAL_MS = 6000;
+constexpr float TWO_PI_F = 6.28318530718f;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 45;
 constexpr uint32_t BUTTON_SHORT_MIN_MS = 35;
 constexpr uint32_t BUTTON_LONG_MS = 1200;
@@ -131,6 +138,13 @@ struct UsageCategory {
   const char *workMode;
   const char *standbyMode;
   bool audioAssist;
+};
+
+struct ChimeNote {
+  uint16_t frequencyHz;
+  uint16_t durationMs;
+  uint16_t gapMs;
+  uint8_t level;
 };
 
 enum class BmsParser : uint8_t {
@@ -318,6 +332,7 @@ struct AppSettings {
   bool trackDailyActivity = true;
   bool trackPay           = false;
   bool autoUpdateCheck    = true;
+  String startupChime;
 };
 
 struct BatterySample {
@@ -477,6 +492,11 @@ bool displayManualOff = false;
 bool ntpConfigured = false;
 bool pendingStaStart = false;
 bool pendingProvisioningStart = false;
+volatile bool startupChimeActive = false;
+bool bootIntroPlayed = false;
+bool bootIntroSawLiveBms = false;
+uint32_t bootIntroReadySinceMs = 0;
+String startupChimeTaskMelody;
 // True only while validating freshly-entered Wi-Fi credentials. Gates the
 // automatic fall-back to the setup AP so that a device which has already
 // connected (or booted with saved creds) never abandons STA on a transient drop.
@@ -3859,9 +3879,14 @@ void loadSettings() {
   settings.trackDailyActivity = prefs.getBool("trackHday", true);
   settings.trackPay           = prefs.getBool("trackPay",  false);
   settings.autoUpdateCheck    = prefs.getBool("autoUpd",   true);
+  settings.startupChime = prefs.getString("chime", "");
   lastKnownTs = prefs.getUInt("lastTs", 0);
   prefs.end();
 
+  settings.startupChime.replace("\r", "");
+  settings.startupChime.replace("\n", "");
+  settings.startupChime.trim();
+  if (settings.startupChime.length() > STARTUP_CHIME_MAX_CHARS) settings.startupChime = "";
   settings.hostname = sanitizeHostname(settings.hostname);
   if (settings.apPassword.length() < 8) settings.apPassword = "r48display";
   if (settings.otaPassword.length() < 8) settings.otaPassword = "r48display";
@@ -3954,6 +3979,7 @@ void saveSettings() {
   prefs.putBool("trackHday", settings.trackDailyActivity);
   prefs.putBool("trackPay",  settings.trackPay);
   prefs.putBool("autoUpd",   settings.autoUpdateCheck);
+  prefs.putString("chime", settings.startupChime);
   prefs.end();
 }
 
@@ -4141,6 +4167,348 @@ void setBacklight(uint8_t duty) {
   }
   ledcWrite(channel, duty);
 #endif
+}
+
+String sanitizeStartupChime(String value) {
+  value.replace("\r", "");
+  value.replace("\n", "");
+  value.trim();
+  return value;
+}
+
+bool startupChimeDisabled(const String &value) {
+  String v = value;
+  v.trim();
+  v.toLowerCase();
+  if (v.isEmpty()) return true;
+  return v == "off" || v == "none" || v == "silent";
+}
+
+bool parseUnsignedField(String value, uint16_t &out) {
+  value.trim();
+  if (value.isEmpty()) return false;
+  uint32_t parsed = 0;
+  for (size_t i = 0; i < value.length(); ++i) {
+    if (value[i] < '0' || value[i] > '9') return false;
+    parsed = parsed * 10U + static_cast<uint32_t>(value[i] - '0');
+    if (parsed > 65535U) return false;
+  }
+  out = static_cast<uint16_t>(parsed);
+  return true;
+}
+
+int noteSemitone(char note) {
+  switch (note >= 'a' && note <= 'z' ? note - 32 : note) {
+    case 'C': return 0;
+    case 'D': return 2;
+    case 'E': return 4;
+    case 'F': return 5;
+    case 'G': return 7;
+    case 'A': return 9;
+    case 'B': return 11;
+    default: return -1;
+  }
+}
+
+bool noteNameToFrequency(String name, uint16_t &frequencyHz) {
+  name.trim();
+  if (name.isEmpty()) return false;
+
+  String lower = name;
+  lower.toLowerCase();
+  if (lower == "r" || lower == "rest" || lower == "-") {
+    frequencyHz = 0;
+    return true;
+  }
+
+  uint16_t numeric = 0;
+  if (parseUnsignedField(name, numeric)) {
+    if (numeric < 30 || numeric > 5000) return false;
+    frequencyHz = numeric;
+    return true;
+  }
+
+  int pos = 0;
+  int semitone = noteSemitone(name[pos++]);
+  if (semitone < 0) return false;
+  if (pos < static_cast<int>(name.length()) && (name[pos] == '#' || name[pos] == 'b' || name[pos] == 'B')) {
+    semitone += name[pos] == '#' ? 1 : -1;
+    ++pos;
+  }
+  if (pos >= static_cast<int>(name.length())) return false;
+  int octave = 0;
+  bool sawOctave = false;
+  for (; pos < static_cast<int>(name.length()); ++pos) {
+    const char c = name[pos];
+    if (c < '0' || c > '9') return false;
+    octave = octave * 10 + (c - '0');
+    sawOctave = true;
+  }
+  if (!sawOctave || octave > 8) return false;
+
+  while (semitone < 0) {
+    semitone += 12;
+    octave--;
+  }
+  while (semitone > 11) {
+    semitone -= 12;
+    octave++;
+  }
+  const int midi = (octave + 1) * 12 + semitone;
+  if (midi < 24 || midi > 108) return false;
+  const float frequency = 440.0f * powf(2.0f, (midi - 69) / 12.0f);
+  frequencyHz = static_cast<uint16_t>(frequency + 0.5f);
+  return true;
+}
+
+bool parseStartupChimeToken(String token, ChimeNote &note, String *error) {
+  token.trim();
+  if (token.isEmpty()) {
+    if (error) *error = "empty note";
+    return false;
+  }
+
+  const int firstColon = token.indexOf(':');
+  const String head = firstColon >= 0 ? token.substring(0, firstColon) : token;
+  if (!noteNameToFrequency(head, note.frequencyHz)) {
+    if (error) *error = "bad note " + head;
+    return false;
+  }
+
+  note.durationMs = 80;
+  note.gapMs = 10;
+  note.level = 80;
+  if (firstColon < 0) return true;
+
+  String rest = token.substring(firstColon + 1);
+  for (uint8_t field = 0; field < 3; ++field) {
+    const int colon = rest.indexOf(':');
+    String part = colon >= 0 ? rest.substring(0, colon) : rest;
+    uint16_t parsed = 0;
+    if (!parseUnsignedField(part, parsed)) {
+      if (error) *error = "bad numeric field in " + token;
+      return false;
+    }
+    if (field == 0) {
+      note.durationMs = constrain(parsed, static_cast<uint16_t>(10), static_cast<uint16_t>(1200));
+    } else if (field == 1) {
+      note.gapMs = constrain(parsed, static_cast<uint16_t>(0), static_cast<uint16_t>(500));
+    } else {
+      note.level = static_cast<uint8_t>(constrain(parsed, static_cast<uint16_t>(1), static_cast<uint16_t>(100)));
+    }
+    if (colon < 0) return true;
+    rest = rest.substring(colon + 1);
+  }
+
+  if (!rest.isEmpty()) {
+    if (error) *error = "too many fields in " + token;
+    return false;
+  }
+  return true;
+}
+
+bool validateStartupChime(String melody, String *error) {
+  melody = sanitizeStartupChime(melody);
+  if (melody.length() > STARTUP_CHIME_MAX_CHARS) {
+    if (error) *error = "melody is too long";
+    return false;
+  }
+  if (melody.isEmpty() || startupChimeDisabled(melody)) return true;
+
+  uint8_t notes = 0;
+  uint32_t totalMs = 0;
+  int start = 0;
+  while (start <= static_cast<int>(melody.length())) {
+    const int comma = melody.indexOf(',', start);
+    String token = comma >= 0 ? melody.substring(start, comma) : melody.substring(start);
+    ChimeNote note{};
+    if (!parseStartupChimeToken(token, note, error)) return false;
+    notes++;
+    totalMs += note.durationMs + note.gapMs;
+    if (notes > STARTUP_CHIME_MAX_NOTES) {
+      if (error) *error = "too many notes";
+      return false;
+    }
+    if (totalMs > STARTUP_CHIME_MAX_TOTAL_MS) {
+      if (error) *error = "melody is too long to play at boot";
+      return false;
+    }
+    if (comma < 0) break;
+    start = comma + 1;
+  }
+
+  if (notes == 0) {
+    if (error) *error = "no notes";
+    return false;
+  }
+  return true;
+}
+
+void writeStartupChimeSamples(const int16_t *samples, size_t frames) {
+  size_t bytesWritten = 0;
+  i2s_write(I2S_NUM_1, samples, frames * 2 * sizeof(int16_t), &bytesWritten, pdMS_TO_TICKS(200));
+}
+
+void writeStartupChimeSilence(uint16_t durationMs) {
+  int16_t samples[STARTUP_CHIME_FRAMES * 2] = {};
+  uint32_t remaining = (STARTUP_CHIME_SAMPLE_RATE * static_cast<uint32_t>(durationMs)) / 1000U;
+  while (remaining > 0) {
+    const size_t frames = remaining > STARTUP_CHIME_FRAMES ? STARTUP_CHIME_FRAMES : remaining;
+    writeStartupChimeSamples(samples, frames);
+    remaining -= frames;
+  }
+}
+
+void writeStartupChimeTone(const ChimeNote &note) {
+  if (note.frequencyHz == 0) {
+    writeStartupChimeSilence(note.durationMs);
+    return;
+  }
+
+  int16_t samples[STARTUP_CHIME_FRAMES * 2];
+  uint32_t remaining = (STARTUP_CHIME_SAMPLE_RATE * static_cast<uint32_t>(note.durationMs)) / 1000U;
+  const uint32_t totalFrames = remaining > 0 ? remaining : 1;
+  const float phaseStep = TWO_PI_F * static_cast<float>(note.frequencyHz) / STARTUP_CHIME_SAMPLE_RATE;
+  const float amplitude = static_cast<float>(note.level) * 128.0f;
+  float phase = 0.0f;
+  uint32_t frameIndex = 0;
+
+  while (remaining > 0) {
+    const size_t frames = remaining > STARTUP_CHIME_FRAMES ? STARTUP_CHIME_FRAMES : remaining;
+    for (size_t i = 0; i < frames; ++i, ++frameIndex) {
+      const float pos = frameIndex / static_cast<float>(totalFrames);
+      const float attack = pos < 0.12f ? pos / 0.12f : 1.0f;
+      const float tail = 1.0f - pos;
+      const float decay = tail > 0.0f ? powf(tail, 1.6f) : 0.0f;
+      const float wave = sinf(phase) + 0.18f * sinf(phase * 2.0f);
+      int32_t raw = static_cast<int32_t>(wave * amplitude * attack * decay);
+      raw = constrain(raw, -14000, 14000);
+      const int16_t lowFi = static_cast<int16_t>((raw / 32) * 32);
+      samples[i * 2] = lowFi;
+      samples[i * 2 + 1] = lowFi;
+      phase += phaseStep;
+      if (phase >= TWO_PI_F) phase -= TWO_PI_F;
+    }
+    writeStartupChimeSamples(samples, frames);
+    remaining -= frames;
+  }
+}
+
+void writeStartupChimeNote(const ChimeNote &note) {
+  writeStartupChimeTone(note);
+  if (note.gapMs > 0) writeStartupChimeSilence(note.gapMs);
+}
+
+bool writeStartupChimeCustom(String melody) {
+  melody = sanitizeStartupChime(melody);
+  if (melody.isEmpty() || startupChimeDisabled(melody)) return false;
+
+  int start = 0;
+  uint8_t notes = 0;
+  uint32_t totalMs = 0;
+  while (start <= static_cast<int>(melody.length())) {
+    const int comma = melody.indexOf(',', start);
+    String token = comma >= 0 ? melody.substring(start, comma) : melody.substring(start);
+    ChimeNote note{};
+    if (!parseStartupChimeToken(token, note, nullptr)) return false;
+    totalMs += note.durationMs + note.gapMs;
+    if (totalMs > STARTUP_CHIME_MAX_TOTAL_MS) return false;
+    writeStartupChimeNote(note);
+    notes++;
+    if (notes > STARTUP_CHIME_MAX_NOTES) return false;
+    if (comma < 0) break;
+    start = comma + 1;
+  }
+  return notes > 0;
+}
+
+void startupChimeTask(void *) {
+  const String melody = startupChimeTaskMelody;
+  if (startupChimeDisabled(melody)) {
+    startupChimeActive = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(350));
+
+  i2s_config_t config{};
+  config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX);
+  config.sample_rate = STARTUP_CHIME_SAMPLE_RATE;
+  config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+  config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  config.dma_buf_count = 4;
+  config.dma_buf_len = STARTUP_CHIME_FRAMES;
+  config.use_apll = false;
+  config.tx_desc_auto_clear = true;
+  config.fixed_mclk = 0;
+
+  i2s_pin_config_t pins{};
+  pins.mck_io_num = I2S_PIN_NO_CHANGE;
+  pins.bck_io_num = PIN_AUDIO_BCLK;
+  pins.ws_io_num = PIN_AUDIO_LRC;
+  pins.data_out_num = PIN_AUDIO_DOUT;
+  pins.data_in_num = I2S_PIN_NO_CHANGE;
+
+  const bool driverInstalled = i2s_driver_install(I2S_NUM_1, &config, 0, nullptr) == ESP_OK;
+  if (driverInstalled) {
+    if (i2s_set_pin(I2S_NUM_1, &pins) == ESP_OK) {
+      i2s_zero_dma_buffer(I2S_NUM_1);
+      String error;
+      if (validateStartupChime(melody, &error)) {
+        writeStartupChimeSilence(20);
+        writeStartupChimeCustom(melody);
+        writeStartupChimeSilence(80);
+      }
+    }
+    i2s_driver_uninstall(I2S_NUM_1);
+  }
+
+  pinMode(PIN_AUDIO_BCLK, INPUT);
+  pinMode(PIN_AUDIO_LRC, INPUT);
+  pinMode(PIN_AUDIO_DOUT, INPUT);
+  startupChimeActive = false;
+  vTaskDelete(nullptr);
+}
+
+void startStartupChime(String melody) {
+  melody = sanitizeStartupChime(melody);
+  if (startupChimeDisabled(melody)) return;
+  if (startupChimeActive) return;
+  startupChimeTaskMelody = melody;
+  startupChimeActive = true;
+  if (xTaskCreate(startupChimeTask, "boot_chime", 4096, nullptr, 1, nullptr) != pdPASS) {
+    startupChimeActive = false;
+  }
+}
+
+void startStartupChime() {
+  startStartupChime(settings.startupChime);
+}
+
+bool bootIntroReady() {
+  // Play the intro as soon as the device has finished booting — no longer wait
+  // for STA/BLE to connect. maybePlayBootIntro() runs from loop() (so setup() is
+  // already complete) and the chime task self-initializes its own I2S output, so
+  // requiring only a ready display is a safe "boot is done" signal.
+  if (startupChimeDisabled(settings.startupChime)) return false;
+  if (!displayReady) return false;
+  return true;
+}
+
+void maybePlayBootIntro() {
+  if (bootIntroPlayed || startupChimeActive) return;
+  if (!bootIntroReady()) {
+    bootIntroReadySinceMs = 0;
+    return;
+  }
+  const uint32_t now = millis();
+  if (bootIntroReadySinceMs == 0) bootIntroReadySinceMs = now;
+  if (now - bootIntroReadySinceMs < 1000UL) return;
+  bootIntroPlayed = true;
+  startStartupChime(settings.startupChime);
 }
 
 uint8_t estimateScreenBatteryPercent(float volts) {
@@ -5373,6 +5741,7 @@ void apiSettingsGet() {
   doc["hours_counted"] = serialized(String(hoursTotal, 2));
   doc["hours_active"] = serialized(String(hoursActive, 2));
   doc["hours_working"] = serialized(String(hoursWorking, 2));
+  doc["startup_chime"] = settings.startupChime;
   sendJson(doc);
 }
 
@@ -5457,6 +5826,16 @@ void apiSettingsPost() {
   if (server.hasArg("ntp_server")) settings.ntpServer = server.arg("ntp_server").substring(0, 128);
   if (server.hasArg("time_format")) settings.timeFormat = server.arg("time_format") == "24h" ? "24h" : "12h";
   if (server.hasArg("temp_unit")) { const String u = server.arg("temp_unit"); settings.tempUnit = (u == "C") ? "C" : "F"; }
+  if (server.hasArg("startup_chime")) {
+    String melody = sanitizeStartupChime(server.arg("startup_chime"));
+    String error;
+    if (!validateStartupChime(melody, &error)) {
+      server.send(400, "application/json", String("{\"error\":\"") + jsonEscape(error) + "\"}");
+      return;
+    }
+    settings.startupChime = melody;
+    bootIntroPlayed = true;
+  }
   // Changing baseline adjusts the displayed total without touching counted hours.
   // Skipping setHoursTotal when baseline changes avoids hours_total (= old_baseline + counted)
   // being misinterpreted as the new total and zeroing the counted portion.
@@ -5509,6 +5888,80 @@ void apiSettingsPost() {
   setupMqtt();
   drawDisplay(true);
   server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void apiStartupChimeGet() {
+  JsonDocument doc;
+  doc["melody"] = settings.startupChime;
+  doc["mode"] = startupChimeDisabled(settings.startupChime) ? "off" : "custom";
+  doc["format"] = "NOTE:duration_ms:gap_ms:level, R:duration_ms";
+  doc["example"] = "C5:80:10:80,E5:80:10:80,G5:120:20:85,R:40,C6:160";
+  doc["max_chars"] = STARTUP_CHIME_MAX_CHARS;
+  doc["max_notes"] = STARTUP_CHIME_MAX_NOTES;
+  doc["max_total_ms"] = STARTUP_CHIME_MAX_TOTAL_MS;
+  sendJson(doc);
+}
+
+void apiStartupChimePost() {
+  String melody;
+  bool hasMelody = false;
+  bool play = false;
+  bool save = true;
+
+  if (server.hasArg("melody")) {
+    melody = server.arg("melody");
+    hasMelody = true;
+  }
+  if (server.hasArg("play")) {
+    const String value = server.arg("play");
+    play = value == "1" || value == "true" || value == "on";
+  }
+  if (server.hasArg("test")) {
+    const String value = server.arg("test");
+    play = play || value == "1" || value == "true" || value == "on";
+  }
+  if (server.hasArg("save")) {
+    const String value = server.arg("save");
+    save = !(value == "0" || value == "false" || value == "off");
+  }
+
+  if (!hasMelody && server.hasArg("plain")) {
+    JsonDocument in;
+    if (deserializeJson(in, server.arg("plain")) == DeserializationError::Ok) {
+      if (!in["melody"].isNull()) {
+        melody = String(in["melody"] | "");
+        hasMelody = true;
+      }
+      play = play || (in["play"] | false) || (in["test"] | false);
+      if (!in["save"].isNull()) save = in["save"] | true;
+    }
+  }
+
+  if (!hasMelody) {
+    server.send(400, "application/json", "{\"error\":\"missing melody\"}");
+    return;
+  }
+
+  melody = sanitizeStartupChime(melody);
+  String error;
+  if (!validateStartupChime(melody, &error)) {
+    server.send(400, "application/json", String("{\"error\":\"") + jsonEscape(error) + "\"}");
+    return;
+  }
+
+  if (save) {
+    settings.startupChime = melody;
+    saveSettings();
+    bootIntroPlayed = true;
+  }
+  if (play) startStartupChime(melody);
+
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["mode"] = startupChimeDisabled(save ? settings.startupChime : melody) ? "off" : "custom";
+  doc["play"] = play;
+  doc["saved"] = save;
+  sendJson(doc);
 }
 
 void apiBmsProfiles() {
@@ -6128,6 +6581,8 @@ void setupRoutes() {
   server.on("/api/hours", HTTP_GET, apiHoursGet);
   server.on("/api/settings", HTTP_GET, apiSettingsGet);
   server.on("/api/settings", HTTP_POST, guarded(apiSettingsPost));
+  server.on("/api/startup-chime", HTTP_GET, apiStartupChimeGet);
+  server.on("/api/startup-chime", HTTP_POST, guarded(apiStartupChimePost));
   server.on("/api/bms/profiles", HTTP_GET, apiBmsProfiles);
   server.on("/api/themes", HTTP_GET, apiThemes);
   server.on("/api/usage-categories", HTTP_GET, apiUsageCategories);
@@ -6309,6 +6764,7 @@ void loop() {
   if (!fwUpdateActive && !provisioningActive) bleBms.loop();  // keep setup AP radio stable
   bleLoopBusy = false;
   updateSocRate();
+  maybePlayBootIntro();
   updateDegradation();
   updateMqtt();
   if (bms.lastAnalogMs > 0 && bms.lastAnalogMs != cachedAnalogSourceMs &&
@@ -6339,12 +6795,20 @@ void loop() {
     // Each path tracks "was ever seen" so the timer only starts on a real transition.
     static bool usbSofEverSeen = false;
     static bool usbInferenceEverSeen = false;
+    static bool externalEverLatched = false;
     static uint32_t shutdownGoneMs = 0;
     if (screenBattery.usbSofDetected) usbSofEverSeen = true;
     if (screenBattery.usbCdcConnected) usbInferenceEverSeen = true;
+    if (screenBatteryExternalLatched) externalEverLatched = true;
     const bool sofGone = usbSofEverSeen && !screenBattery.usbSofDetected;
     const bool inferenceGone = usbInferenceEverSeen && !screenBattery.usbCdcConnected;
-    if (screenBattery.present && (sofGone || inferenceGone)) {
+    // Prompt path: removing external power drops the pack voltage sharply, which
+    // clears screenBatteryExternalLatched (see updateScreenBattery). This fires
+    // within seconds for ANY supply (mower/adapter) — the SOF path needs a
+    // computer USB host, and the inference path waits for the onboard battery to
+    // fall below 80%, which is what made shutdown take minutes.
+    const bool externalGone = externalEverLatched && !screenBatteryExternalLatched;
+    if (screenBattery.present && (sofGone || inferenceGone || externalGone)) {
       if (shutdownGoneMs == 0) shutdownGoneMs = now;
       else if (!settings.powerSaveEnabled && now - shutdownGoneMs > 8000UL) {
         saveSettings(); saveHours(); saveMaintenance(); saveDegradation();

@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 static constexpr const char *PROJECT_NAME = "R48Display";
-static constexpr const char *FIRMWARE_VERSION = "0.5.0a15";
+static constexpr const char *FIRMWARE_VERSION = "0.5.0a19";
 
 // Waveshare ESP32-S3-Touch-LCD-1.85 display pinout.
 static constexpr int PIN_LCD_BL = 5;
@@ -46,6 +46,11 @@ static constexpr int PIN_SD_SCK  = 14;
 static constexpr int PIN_MIC_WS = 2;
 static constexpr int PIN_MIC_SCK = 15;
 static constexpr int PIN_MIC_SD = 39;
+
+// Optional PCM5101 I2S audio output used by the Waveshare demo.
+static constexpr int PIN_AUDIO_BCLK = 48;
+static constexpr int PIN_AUDIO_LRC = 38;
+static constexpr int PIN_AUDIO_DOUT = 47;
 
 static constexpr uint16_t DISPLAY_WIDTH = 360;
 static constexpr uint16_t DISPLAY_HEIGHT = 360;

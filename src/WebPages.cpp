@@ -188,6 +188,7 @@ PGM_P settingsBody() {
       "<label>Display Title<input name='title' autocomplete='off' placeholder='Ryobi Mower (leave blank to use hostname)'></label>"
       "<label>Hostname (network / mDNS)<input name='hostname' autocomplete='off' placeholder='ryobi'></label>"
       "<label>OTA Password<input name='ota_password' type='password' autocomplete='new-password'></label>"
+      "<label id='intro-label'>Intro<input name='startup_chime' id='intro-field' maxlength='1024' autocomplete='off'></label>"
       "</div>"
       "</div>"
 
@@ -1079,6 +1080,13 @@ async function mqttTest() {
   if (el) el.textContent = j.status + (j.broker ? ' → ' + j.broker : '');
 }
 
+async function testIntro() {
+  const el = document.getElementById('intro-field');
+  const melody = el ? el.value.trim() : '';
+  if (!melody) return;
+  await postForm('/api/startup-chime', {melody, play:'1', save:'0'});
+}
+
 function wireActions() {
   qsa('[data-display]').forEach(btn => btn.addEventListener('click', () => postForm('/api/display/page', {page: btn.dataset.display}).then(refresh)));
   $('wifi-scan')?.addEventListener('click', scanWifi);
@@ -1112,6 +1120,13 @@ function wireActions() {
   });
   document.querySelector('[name=display_rotation]')?.addEventListener('change', e => {
     postForm('/api/settings', {display_rotation: e.target.value});
+  });
+  document.getElementById('intro-field')?.addEventListener('dblclick', e => {
+    e.preventDefault();
+    testIntro();
+  });
+  document.getElementById('intro-label')?.addEventListener('click', e => {
+    if (e.target === e.currentTarget) testIntro();
   });
   $('settings-form')?.addEventListener('submit', async (ev) => {
     ev.preventDefault();
