@@ -1,0 +1,28 @@
+name: Build Updates Variant
+
+# Validates the on-device-update firmware variant (custom_sdkconfig / dynamic
+# mbedTLS buffers), which can't be built locally because the ESP-IDF hybrid build
+# rejects the space in the developer's project path. CI runners have no spaces.
+# Runs when this workflow or platformio.ini changes on the 0.5.x branch, or on
+# manual dispatch.
+
+on:
+  push:
+    branches: [ 0.5.x-core3 ]
+    paths:
+      - '.github/workflows/updates-build.yml'
+      - 'platformio.ini'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build _updates env (custom_sdkconfig dynamic mbedTLS)
+        run: pio run -e waveshare_esp32_s3_touch_lcd_1_85_updates

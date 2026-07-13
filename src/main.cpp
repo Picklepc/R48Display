@@ -6732,13 +6732,24 @@ void setup() {
   weatherMux = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(weatherTask, "weather", 8192, nullptr, 1, &weatherTaskHandle, 0);
   fwUpdMux = xSemaphoreCreateMutex();
-  // The self-update task is NOT started yet: its TLS handshake needs ~16 KB of
-  // contiguous internal RAM this device can't spare with the default (static)
-  // mbedTLS buffers. The fix (CONFIG_MBEDTLS_DYNAMIC_BUFFER via custom_sdkconfig)
-  // needs pioarduino's ESP-IDF hybrid build, which rejects the space in this
-  // machine's project path — see M5.0-05a. Until that path is resolved, use the
-  // USB installer; fwUpdTaskHandle stays null and the update endpoints report
-  // unavailable.
+#ifdef FWUPD_ONDEVICE
+  // On-device self-update task — enabled only in the `_updates` build, which
+  // turns on CONFIG_MBEDTLS_DYNAMIC_BUFFER so the TLS handshake frees its ~16 KB
+  // buffers when idle instead of reserving them (the fragmentation that wedged
+  // the web server on 2.x). A non-null handle makes on_device=true and enables
+  // /api/update/check + /apply. Built in CI — the IDF hybrid build custom_sdkconfig
+  // needs can't run from this machine's spaced project path (see M5.0-05a).
+  if (xTaskCreatePinnedToCore(fwUpdTask, "fwupd", 16384, nullptr, 1,
+                              &fwUpdTaskHandle, 0) != pdPASS) {
+    fwUpdTaskHandle = nullptr;
+    Serial.println(F("[fwupd] task create failed"));
+  }
+#else
+  // The self-update task is NOT started in the base build: its TLS handshake
+  // needs ~16 KB of contiguous internal RAM this device can't spare with the
+  // default (static) mbedTLS buffers. fwUpdTaskHandle stays null and the update
+  // endpoints report unavailable; use the USB installer.
+#endif
   drawDisplay(true);
   Serial.printf("WiFi mode: %s\n", provisioningActive ? "setup AP" : "STA");
   Serial.printf("Touch %s\n", touchReady ? "ready" : "missing");
