@@ -7,11 +7,9 @@ name: Build Updates Variant
 # manual dispatch.
 
 on:
-  push:
-    branches: [ 0.5.x-core3 ]
-    paths:
-      - '.github/workflows/updates-build.yml'
-      - 'platformio.ini'
+  # Manual only. Auto-build disabled: the custom_sdkconfig hybrid build currently
+  # fails on CI too (a managed component needs an unprovided embedded cert,
+  # `https_server.crt.S`). See TASKS M5.0-05a before re-enabling.
   workflow_dispatch:
 
 jobs:
