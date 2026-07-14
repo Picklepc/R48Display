@@ -22,6 +22,7 @@
 #include <esp_ota_ops.h>
 #include <esp_task_wdt.h>
 #include <nvs_flash.h>
+#include <esp_partition.h>
 #include <driver/i2s.h>
 
 #include <Arduino_GFX_Library.h>
@@ -3163,6 +3164,19 @@ void apiHeatmapExport() {
         p.end();
       }
     }
+    // Fill today's cell live from the day-start snapshot — it isn't written to
+    // NVS until the next day rolls over, so without this the CSV omits the
+    // current day (the on-screen heatmap does the same in apiHeatmapGet).
+    if (year == curYear && hdaySnapYear == curYear && hdaySnapYday == curYday &&
+        curYday >= 0 && curYday < days) {
+      const float liveSta = max(0.0f, hoursStandby - hdaySnapSta);
+      float liveAct = max(0.0f, hoursActive  - hdaySnapAct);
+      float liveWrk = max(0.0f, hoursWorking - hdaySnapWrk);
+      applyWorkLogToHday(curYear, curYday, liveAct, liveWrk);
+      buf[curYday * 4 + 0] = hdayTenths(liveSta);
+      buf[curYday * 4 + 1] = hdayTenths(liveAct);
+      buf[curYday * 4 + 2] = hdayTenths(liveWrk);
+    }
     for (int d = 0; d < days; d++) {
       if (year == curYear && d > curYday) break;
       const float sta = buf[d*4+0] / 10.0f;
@@ -3182,7 +3196,11 @@ void apiHeatmapExport() {
           maintStr += mit->second[i];
         }
       }
-      server.sendContent(String(ds) + ',' + String(sta, 1) + ',' + String(act, 1) + ',' +
+      // `act` (hoursActive) counts driving AND mowing; the driving column is the
+      // remainder after mowing, matching the on-screen heatmap. Emitting raw act
+      // here double-counted mowing under the "driving" label.
+      const float drv = max(0.0f, act - wrk);
+      server.sendContent(String(ds) + ',' + String(sta, 1) + ',' + String(drv, 1) + ',' +
                          String(wrk, 1) + ',' + csvEscape(maintStr) + '\n');
       yield();
     }
@@ -3494,7 +3512,9 @@ void apiPayGet() {
       obj["period_start"] = pr.periodStart;
       obj["notes"]        = pr.notes;
       const float workH   = computePayWorkH(pr.periodStart, now);
-      obj["work_h"]       = serialized(String(workH, 1));
+      // 2 decimals so small in-progress totals aren't shown as "0.0 h" next to a
+      // non-zero earned amount (earned is computed from the unrounded value).
+      obj["work_h"]       = serialized(String(workH, 2));
       obj["earned"]       = serialized(String(workH * pr.rate, 2));
     }
   }
@@ -3637,7 +3657,16 @@ void apiPayExport() {
     loadPayHistoryFor(pr.id);
     const auto it = payHistory.find(pr.id);
     if (it == payHistory.end() || it->second.empty()) {
-      csv += csvEscape(pr.payee) + F(",,,,,\n");
+      // No paid-out history yet — emit the current in-progress period so the CSV
+      // matches what the Pay page shows for this payee instead of a blank row.
+      const uint32_t now = static_cast<uint32_t>(time(nullptr));
+      char fromBuf[20] = "";
+      time_t tf = static_cast<time_t>(pr.periodStart);
+      struct tm tm;
+      if (localtime_r(&tf, &tm)) strftime(fromBuf, sizeof(fromBuf), "%Y-%m-%d", &tm);
+      const float workH = computePayWorkH(pr.periodStart, now);
+      csv += csvEscape(pr.payee) + ',' + fromBuf + F(",(in progress),") +
+             String(workH, 2) + ',' + String(workH * pr.rate, 2) + F(",\n");
       continue;
     }
     for (const auto &e : it->second) {
@@ -6564,6 +6593,89 @@ void handleUpdateUpload() {
   }
 }
 
+// ── Full-device backup / restore (raw NVS partition image) ───────────────────
+// The backup is a byte-for-byte copy of the 256 KB NVS partition, so it captures
+// EVERYTHING — settings, all hours history, maintenance, pay — and (in plain
+// text) the Wi-Fi/MQTT/AP/OTA passwords. Restoring clones one board's state onto
+// another, which is how you migrate history to a replacement board when one
+// fails. The Settings UI warns about the plaintext passwords and that a restore
+// overwrites everything and reboots.
+static const esp_partition_t *nvsPartition() {
+  return esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                  ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+}
+
+void apiBackup() {
+  const esp_partition_t *nvs = nvsPartition();
+  if (!nvs) { server.send(500, "text/plain", "nvs partition not found"); return; }
+  char fname[64];
+  snprintf(fname, sizeof(fname), "attachment; filename=\"r48-backup-%s.nvs\"",
+           chipSuffix().c_str());
+  server.sendHeader("Content-Disposition", fname);
+  server.setContentLength(nvs->size);
+  server.send(200, "application/octet-stream", "");
+  uint8_t buf[4096];
+  for (size_t off = 0; off < nvs->size; off += sizeof(buf)) {
+    const size_t n = min(sizeof(buf), static_cast<size_t>(nvs->size - off));
+    if (esp_partition_read(nvs, off, buf, n) != ESP_OK) break;
+    server.sendContent(reinterpret_cast<const char *>(buf), n);
+    esp_task_wdt_reset();
+    yield();
+  }
+}
+
+static uint8_t *restoreBuf     = nullptr;
+static size_t   restoreLen     = 0;
+static bool     restoreBlocked = false;   // cross-origin, no PSRAM, or overflow
+
+void handleRestoreUpload() {
+  HTTPUpload &upload = server.upload();
+  const esp_partition_t *nvs = nvsPartition();
+  if (upload.status == UPLOAD_FILE_START) {
+    if (restoreBuf) { heap_caps_free(restoreBuf); restoreBuf = nullptr; }
+    restoreLen = 0;
+    restoreBlocked = !sameOriginOk() || !nvs;
+    if (restoreBlocked) return;
+    restoreBuf = static_cast<uint8_t *>(heap_caps_malloc(nvs->size, MALLOC_CAP_SPIRAM));
+    if (!restoreBuf) restoreBlocked = true;   // needs 256 KB PSRAM
+  } else if (restoreBlocked) {
+    return;
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    esp_task_wdt_reset();
+    if (!nvs || restoreLen + upload.currentSize > nvs->size) { restoreBlocked = true; return; }
+    memcpy(restoreBuf + restoreLen, upload.buf, upload.currentSize);
+    restoreLen += upload.currentSize;
+  }
+}
+
+void handleRestoreDone() {
+  const esp_partition_t *nvs = nvsPartition();
+  const size_t need = nvs ? nvs->size : 0;
+  if (restoreBlocked || !restoreBuf || !nvs || restoreLen != need) {
+    const char *msg = restoreBlocked
+        ? "Restore blocked (cross-origin, or this board has no PSRAM for the buffer)."
+        : (restoreLen && restoreLen != need)
+            ? "Backup file is the wrong size for this device's NVS partition."
+            : "No backup file received.";
+    server.send(400, "text/plain", msg);
+    if (restoreBuf) { heap_caps_free(restoreBuf); restoreBuf = nullptr; }
+    restoreLen = 0;
+    return;
+  }
+  // Write the image over the NVS partition, then reboot so NVS re-initializes
+  // from it. A partial/garbage write only makes NVS reset to defaults on the
+  // next boot (recoverable), so a bad restore can't brick the device.
+  esp_err_t er = esp_partition_erase_range(nvs, 0, nvs->size);
+  if (er == ESP_OK) er = esp_partition_write(nvs, 0, restoreBuf, nvs->size);
+  heap_caps_free(restoreBuf); restoreBuf = nullptr; restoreLen = 0;
+  server.sendHeader("Connection", "close");
+  server.send(er == ESP_OK ? 200 : 500, "text/plain",
+              er == ESP_OK ? "Backup restored. Rebooting."
+                           : "Restore write failed. Rebooting to reinitialize.");
+  delay(500);
+  ESP.restart();
+}
+
 static WebServer::THandlerFunction guarded(void (*handler)()) {
   return [handler]() {
     if (!sameOriginOk()) {
@@ -6584,6 +6696,8 @@ void setupRoutes() {
   server.on("/status", HTTP_GET, []() { server.sendHeader("Location", "/", true); server.send(302, "text/plain", ""); });
   server.on("/update", HTTP_GET, []() { server.sendHeader("Location", "/settings"); server.send(302); });
   server.on("/update", HTTP_POST, handleUpdatePostDone, handleUpdateUpload);
+  server.on("/api/backup", HTTP_GET, apiBackup);  // download; cross-origin JS can't read it (no CORS headers)
+  server.on("/api/backup/restore", HTTP_POST, handleRestoreDone, handleRestoreUpload);
   server.on("/theme.css", HTTP_GET, []() { server.send(200, "text/css", themeCss()); });
   server.on("/app.js", HTTP_GET, []() {
     server.sendHeader("Connection", "close");

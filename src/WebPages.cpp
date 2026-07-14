@@ -409,6 +409,22 @@ PGM_P settingsBody() {
       "</details>"
       "</div>"
 
+      "<div class='card wide'>"
+      "<h2 style='margin-bottom:12px'>Backup &amp; Restore</h2>"
+      "<p class='hint' style='margin-top:0'>A backup is a full clone of this device's storage &mdash; every setting, the complete hours history, maintenance, and pay records &mdash; so you can move it all to a replacement board if this one fails.</p>"
+      "<p class='hint' style='color:var(--danger,#e0736b)'><b>&#9888; The backup file stores your Wi&#8209;Fi and MQTT passwords in plain text.</b> Keep it somewhere private.</p>"
+      "<button type='button' onclick=\"location.href='/api/backup'\">Download backup</button>"
+      "<details style='margin-top:14px'>"
+      "<summary style='cursor:pointer;color:var(--muted);font-size:14px'>Restore from a backup (overwrites everything)</summary>"
+      "<form method='POST' action='/api/backup/restore' enctype='multipart/form-data' style='margin-top:10px' onsubmit=\"return confirm('Restore OVERWRITES all settings and history on this device, then reboots. Continue?')\">"
+      "<div class='form-grid' style='margin-bottom:10px'>"
+      "<label>Backup file<span class='hint'>Upload a <b>.nvs</b> backup taken from this or another R48Display running the same firmware. The device reboots after restoring.</span><input type='file' name='backup' accept='.nvs'></label>"
+      "</div>"
+      "<button class='primary'>Restore &amp; Reboot</button>"
+      "</form>"
+      "</details>"
+      "</div>"
+
       "</section>");
 }
 
