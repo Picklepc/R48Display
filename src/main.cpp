@@ -6461,6 +6461,16 @@ static void fwUpdTask(void *) {
   }
 }
 
+// arduino-esp32 2.x (<= 0.4.x) and 3.x (>= 0.5.0) ship different bootloaders, so
+// an app-only OTA across that line boot-loops (M5.0-09). Returns 2 or 3, or 0 if
+// the version can't be parsed — callers must fail OPEN so same-era updates work.
+static int firmwareEra(const char *ver) {
+  if (!ver || !ver[0]) return 0;
+  int major = -1, minor = -1;
+  if (sscanf(ver, "%d.%d", &major, &minor) != 2 || major < 0 || minor < 0) return 0;
+  return (major > 0 || minor >= 5) ? 3 : 2;
+}
+
 void apiUpdateStatus() {
   JsonDocument doc;
   doc["current"] = FIRMWARE_VERSION;
@@ -6498,17 +6508,28 @@ void apiUpdateApply() {
   String tag;
   for (char c : String(in["version"] | "")) if ((c >= '0' && c <= '9') || c == '.') tag += c;
   bool ok = false;
+  String targetVer;
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, pdMS_TO_TICKS(200)) == pdTRUE) {
     if (tag.length()) {
       gFwUpd.targetTag = "v" + tag;         // explicit choice: allow any release
+      targetVer = tag;
       ok = !gFwUpd.busy;
     } else {
       gFwUpd.targetTag = gFwUpd.latestTag;  // default: latest, only if newer
+      targetVer = gFwUpd.latestVersion;
       ok = gFwUpd.available && !gFwUpd.busy;
     }
     xSemaphoreGive(fwUpdMux);
   }
   if (!ok) { server.send(409, "application/json", F("{\"error\":\"no_update\"}")); return; }
+  // M5.0-09: never apply an app-only OTA across the 2.x<->3.x bootloader line —
+  // it won't boot. Fail open if either version can't be parsed.
+  if (firmwareEra(targetVer.c_str()) && firmwareEra(FIRMWARE_VERSION) &&
+      firmwareEra(targetVer.c_str()) != firmwareEra(FIRMWARE_VERSION)) {
+    server.send(409, "application/json",
+      F("{\"error\":\"requires_full_flash\",\"note\":\"This version changes the bootloader; install it over USB at picklepc.github.io/R48Display\"}"));
+    return;
+  }
   xTaskNotify(fwUpdTaskHandle, FWUPD_APPLY_BIT, eSetBits);
   server.send(200, "application/json", F("{\"ok\":true,\"note\":\"Update starting; device will reboot\"}"));
 }

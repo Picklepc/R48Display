@@ -405,7 +405,7 @@ PGM_P settingsBody() {
       "</div>"
       "<button class='primary'>Upload &amp; Reboot</button>"
       "</form>"
-      "<p class='hint' style='margin-top:10px'>The device reboots automatically after a successful flash. If it rejects the file, you likely picked firmware-merged.bin &mdash; use the version picker above instead.</p>"
+      "<p class='hint' style='margin-top:10px'>The device reboots automatically after a successful flash. If it rejects the file, you likely picked firmware-merged.bin &mdash; use the version picker above instead. Only upload firmware from the <b>same generation</b>: moving between 0.4.x and 0.5.x changes the bootloader and must be done with the USB installer, not an app-only upload.</p>"
       "</details>"
       "</div>"
 
