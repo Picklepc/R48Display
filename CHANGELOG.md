@@ -6,6 +6,7 @@ release shows only that version's notes.
 
 | Version | Summary |
 |---|---|
+| [v0.5.0a22](docs/releases/v0.5.0a22.md) | **Alpha (pre-release)** — on-device firmware updates re-enabled (user-initiated check only): the check tears BLE down to free RAM for the TLS handshake (no custom mbedTLS build), reports whether an update installs on-device (OTA) or is a major update needing USB, and saves hours before an OTA reboots. Needs a hardware test to confirm the handshake fits. |
 | [v0.5.0a21](docs/releases/v0.5.0a21.md) | **Alpha (pre-release)** — full backup/restore (clone the whole NVS to migrate history to a replacement board; warns the file holds passwords in plaintext); hours/pay views reconciled (CSV driving no longer double-counts mowing and includes today; pay hours match earnings; pay CSV shows the active period); blocks app-only OTA across the 0.4.x/0.5.x bootloader boundary. |
 | [v0.5.0a20](docs/releases/v0.5.0a20.md) | **Alpha (pre-release)** — reliable OTA: the ArduinoOTA/espota path now tears BLE down during the transfer (BLE + OTA were contending for radio/RAM and dropping the upload mid-stream on a live device). Install over USB; the fix helps subsequent over-the-air updates. |
 | [v0.5.0a19](docs/releases/v0.5.0a19.md) | **Alpha (pre-release)** — boot audio intro plays right after boot instead of waiting for STA/BLE; restores prompt power-off on external-power loss (sharp pack-voltage-drop detection, ~8 s debounce) so it no longer runs for minutes on the onboard battery. Rolls up a16–a18 audio + display-panel work. |

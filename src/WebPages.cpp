@@ -1239,12 +1239,17 @@ function renderUpdateStatus(s) {
     if (pbar) pbar.style.width = (s.progress || 0) + '%';
   } else if (pwrap) { pwrap.style.display = 'none'; }
   if (latest) {
-    if (s.checked && s.latest) latest.textContent = s.available ? `Update available: v${s.latest}` : `Up to date (latest v${s.latest})`;
-    else latest.textContent = '';
+    if (s.checked && s.latest) {
+      if (s.available && s.requires_full_flash)
+        latest.innerHTML = `Update available: v${s.latest} (major update &mdash; bootloader change). <a href='https://picklepc.github.io/R48Display/' target='_blank'>Install over USB</a>`;
+      else if (s.available) latest.textContent = `Update available: v${s.latest} (installs on device)`;
+      else latest.textContent = `Up to date (latest v${s.latest})`;
+    } else latest.textContent = '';
   }
   if (install) {
-    install.style.display = (s.available && !busy) ? '' : 'none';
-    if (s.available) install.textContent = `Install v${s.latest}`;
+    const onDeviceOk = s.available && !s.requires_full_flash;   // same-generation → OTA
+    install.style.display = (onDeviceOk && !busy) ? '' : 'none';
+    if (onDeviceOk) install.textContent = `Install v${s.latest}`;
   }
   // Version picker lists v0.3.6+ only (older builds predate the self-updater).
   const selTags = (Array.isArray(s.tags) ? s.tags : []).filter(t => {

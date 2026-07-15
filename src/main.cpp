@@ -332,7 +332,7 @@ struct AppSettings {
   float weatherLon = 0.0f;
   bool trackDailyActivity = true;
   bool trackPay           = false;
-  bool autoUpdateCheck    = true;
+  bool autoUpdateCheck    = false;  // user-initiated lookups only; no background checks
   String startupChime;
 };
 
@@ -3907,7 +3907,7 @@ void loadSettings() {
   hoursWorking = prefs.getFloat("hrsWork", 0.0f);
   settings.trackDailyActivity = prefs.getBool("trackHday", true);
   settings.trackPay           = prefs.getBool("trackPay",  false);
-  settings.autoUpdateCheck    = prefs.getBool("autoUpd",   true);
+  settings.autoUpdateCheck    = prefs.getBool("autoUpd",   false);
   settings.startupChime = prefs.getString("chime", "");
   lastKnownTs = prefs.getUInt("lastTs", 0);
   prefs.end();
@@ -6228,6 +6228,7 @@ struct FirmwareUpdateState {
   String   targetTag;            // tag chosen to install; empty → latest
   std::vector<String> tags;      // recent release tags, newest first (for the picker)
   bool     available   = false;  // latest > running
+  bool     requiresFullFlash = false;  // latest crosses the 2.x/3.x bootloader era → USB-only
   bool     busy        = false;  // a check or download is in flight
   String   phase       = "idle"; // idle | checking | downloading | error
   String   error;                // last error message for the UI
@@ -6235,6 +6236,7 @@ struct FirmwareUpdateState {
   bool     checked     = false;  // at least one check has completed
 };
 static FirmwareUpdateState gFwUpd;
+static int firmwareEra(const char *ver);  // fwd decl (defined near apiUpdateApply)
 static SemaphoreHandle_t   fwUpdMux        = nullptr;
 static TaskHandle_t        fwUpdTaskHandle = nullptr;
 static volatile bool       fwUpdateActive  = false;  // pauses BLE loop during flash
@@ -6367,16 +6369,22 @@ static void fwUpdDoCheck(bool bleFallback) {
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = true; gFwUpd.phase = "checking"; xSemaphoreGive(fwUpdMux);
   }
-  (void)bleFallback;  // BLE is NOT torn down for a check anymore — see below.
-  // Single best-effort attempt. The old fallback tore NimBLE down to free heap
-  // for the TLS buffers, but (a) it didn't help — the mbedTLS buffers on
-  // arduino-esp32 2.0.17 need two large contiguous internal blocks this device
-  // can't provide even with BLE off, and (b) the teardown/re-init churned the
-  // radio + heap and left the web server unresponsive. A failed check must stay
-  // harmless; updates go through the USB web installer.
+  (void)bleFallback;
+  // M5.0-05d: tear NimBLE down (freeing the ~40 KB BLE controller) so the TLS
+  // handshake has the contiguous internal RAM it needs. On arduino-esp32 2.0.17
+  // even this wasn't enough (fragmented heap, ~7 KB largest block), but core 3's
+  // allocator plus one clean freed block may fit. Single best-effort attempt;
+  // BLE is restored right after so a failed check stays harmless.
+  const bool bleWasUp = bms.initialized;
+  if (bleWasUp) fwUpdPauseBle();
+  Serial.printf("[fwupd] check: internal free %u / largest %u (BLE %s)\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                bleWasUp ? "down" : "off");
   std::vector<String> tags;
   String err1;
   const bool ok = fwUpdFetchReleases(tags, err1);
+  if (bleWasUp) fwUpdResumeBle();
   if (fwUpdMux && xSemaphoreTake(fwUpdMux, portMAX_DELAY) == pdTRUE) {
     gFwUpd.busy = false;
     gFwUpd.checked = true;
@@ -6387,6 +6395,11 @@ static void fwUpdDoCheck(bool bleFallback) {
       gFwUpd.latestTag = tags[0];
       gFwUpd.latestVersion = ver;
       gFwUpd.available = versionIsNewer(ver, FIRMWARE_VERSION);
+      // On-device (OTA) only if the target stays on this bootloader generation;
+      // otherwise the UI sends the user to the USB installer (M5.0-09/11).
+      gFwUpd.requiresFullFlash = gFwUpd.available &&
+          firmwareEra(ver.c_str()) && firmwareEra(FIRMWARE_VERSION) &&
+          firmwareEra(ver.c_str()) != firmwareEra(FIRMWARE_VERSION);
       gFwUpd.phase = "idle";
       gFwUpd.error = "";
     } else {
@@ -6408,6 +6421,10 @@ static void fwUpdDoApply() {
     xSemaphoreGive(fwUpdMux);
   }
   if (tag.isEmpty()) { fwUpdSetPhase("error", "No release selected"); return; }
+
+  // Hours history is maintenance-critical: persist it (and settings) before the
+  // update reboots, so an OTA can never lose the latest accrued hours.
+  saveSettings(); saveHours(); saveMaintenance(); saveDegradation();
 
   // Free internal heap for the TLS session by tearing BLE down — with the
   // loop handshake so we never deinit while a BLE call is in flight.
@@ -6480,6 +6497,7 @@ void apiUpdateStatus() {
     doc["checked"]   = gFwUpd.checked;
     doc["latest"]    = gFwUpd.latestVersion;
     doc["available"] = gFwUpd.available;
+    doc["requires_full_flash"] = gFwUpd.requiresFullFlash;  // true → USB-only (major update)
     doc["busy"]      = gFwUpd.busy;
     doc["phase"]     = gFwUpd.phase;
     doc["progress"]  = gFwUpd.progress;
@@ -6867,24 +6885,15 @@ void setup() {
   weatherMux = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(weatherTask, "weather", 8192, nullptr, 1, &weatherTaskHandle, 0);
   fwUpdMux = xSemaphoreCreateMutex();
-#ifdef FWUPD_ONDEVICE
-  // On-device self-update task — enabled only in the `_updates` build, which
-  // turns on CONFIG_MBEDTLS_DYNAMIC_BUFFER so the TLS handshake frees its ~16 KB
-  // buffers when idle instead of reserving them (the fragmentation that wedged
-  // the web server on 2.x). A non-null handle makes on_device=true and enables
-  // /api/update/check + /apply. Built in CI — the IDF hybrid build custom_sdkconfig
-  // needs can't run from this machine's spaced project path (see M5.0-05a).
+  // On-device self-update task (M5.0-05d). The check/apply tear BLE down first
+  // (fwUpdPauseBle) to free the ~40 KB the TLS handshake needs — the fix that
+  // makes on-device updates viable on core 3 without a custom mbedTLS build.
+  // A non-null handle makes on_device=true and enables /api/update/check + /apply.
   if (xTaskCreatePinnedToCore(fwUpdTask, "fwupd", 16384, nullptr, 1,
                               &fwUpdTaskHandle, 0) != pdPASS) {
     fwUpdTaskHandle = nullptr;
     Serial.println(F("[fwupd] task create failed"));
   }
-#else
-  // The self-update task is NOT started in the base build: its TLS handshake
-  // needs ~16 KB of contiguous internal RAM this device can't spare with the
-  // default (static) mbedTLS buffers. fwUpdTaskHandle stays null and the update
-  // endpoints report unavailable; use the USB installer.
-#endif
   drawDisplay(true);
   Serial.printf("WiFi mode: %s\n", provisioningActive ? "setup AP" : "STA");
   Serial.printf("Touch %s\n", touchReady ? "ready" : "missing");
