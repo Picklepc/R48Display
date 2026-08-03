@@ -30,6 +30,7 @@
 #include "DisplayUi.h"
 #include "MicDetector.h"
 #include "MqttClient.h"
+#include "PanelST77916.h"
 #include "WebPages.h"
 
 namespace {
@@ -415,7 +416,7 @@ TwoWire touchWire(1);
 
 Arduino_DataBus *displayBus = new Arduino_ESP32QSPI(
     PIN_LCD_CS, PIN_LCD_SCK, PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3);
-Arduino_GFX *gfx = new Arduino_ST77916(
+Arduino_GFX *gfx = new Arduino_ST77916_R48(
     displayBus, GFX_NOT_DEFINED, 0, true, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
 struct DegradationData {
